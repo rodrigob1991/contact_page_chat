@@ -3,22 +3,28 @@ import { createClient } from 'redis'
 import http from "http"
 import dotenv from "dotenv"
 import { v4 as uuidv4 } from 'uuid'
+import {throws} from "assert"
 
 type UserType = "host" | "guess"
 
-type OutboundToHostMesMessage = `mes:${string}:${number}:${string}`
-type OutboundToHostConMessage = `con:${string}:${number}`
-type OutboundToHostDisMessage = `dis:${string}:${number}`
+type OutboundToHostMesMessage = `mes:${number}:${string}:${string}`
+type OutboundToHostConMessage = `con:${number}:${string}`
+type OutboundToHostDisMessage = `dis:${number}:${string}`
 type OutboundToHostAckMessage = `ack:${number}`
 type OutboundToGuessMesMessage = `mes:${number}:${string}`
 type OutboundToGuessConMessage = `con:${number}`
 type OutboundToGuessDisMessage = `dis:${number}`
 type OutboundToGuessAckMessage = `ack:${number}`
 
-type InboundFromHostMesMessage = `mes:${string}:${number}:${string}`
+type OutboundMessage = OutboundToHostMesMessage | OutboundToHostConMessage | OutboundToHostDisMessage | OutboundToHostAckMessage
+    | OutboundToGuessMesMessage | OutboundToGuessConMessage | OutboundToGuessDisMessage | OutboundToGuessAckMessage
+
+type InboundFromHostMesMessage = `mes:${number}:${string}:${string}`
 type InboundFromHostAckMessage = `ack:${number}`
 type InboundFromGuessMesMessage = `mes:${number}:${string}`
 type InboundFromGuessAckMessage = `ack:${number}`
+
+type InboundMessage = InboundFromHostMesMessage | InboundFromHostAckMessage | InboundFromGuessMesMessage | InboundFromGuessAckMessage
 
 //type HostGuess<T extends string> = T extends string ? `${T}-host` |  `${T}-guess` : never
 type MessagePrefix = "con" | "dis" | "mes" | "ack"
@@ -67,13 +73,46 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
             const connection = request.accept("echo-protocol", origin)
             console.log((new Date()) + " connection accepted")
 
-            const sendMessage: SendMessage = (mp, payload) => { connection.sendUTF() }
+            const userType: UserType  = request.httpRequest.headers.host_user === process.env.HOST_USER_SECRET ? "host" : "guess"
+            const guessId = userType === "host" ? undefined : uuidv4()
 
-            const isHostUser = request.httpRequest.headers.host_user === process.env.HOST_USER_SECRET
-            const guessId = isHostUser ? undefined : uuidv4()
+            const sendMessage: SendMessage = (mp, payload) => {
+                const nro = 10
+                let message: OutboundMessage
+                const toHost = userType === "host"
+                switch (true) {
+                    case mp === "con" && toHost:
+                        message = `con:${nro}:${payload}`
+                        break
+                    case mp === "con" && !toHost:
+                        message = `con:${nro}`
+                        break
+                    case mp === "dis" && toHost:
+                        message = `dis:${nro}:${payload}`
+                        break
+                    case mp === "dis" && !toHost:
+                        message = `dis:${nro}`
+                        break
+                    case mp === "mes" && toHost:
+                        message = `mes:${nro}:${payload as `${string}:${string}`}`
+                        break
+                    case mp === "mes" && !toHost:
+                        message = `mes:${nro}:${payload}`
+                        break
+                    case mp === "ack" && toHost:
+                        message = `ack:${payload as `${number}`}`
+                        break
+                    case mp === "ack" && !toHost:
+                        message = `ack:${payload as `${number}`}`
+                        break
+                    default:
+                        throw new Error("should had enter some case")
+                }
+                connection.sendUTF(message)
+            }
 
-            subscribeToMessages(sendMessage, isHostUser, guessId)
-            publishMessage("con", "", isHostUser, guessId)
+            subscribeToMessages(sendMessage, userType, guessId)
+            publishMessage("con", "", userType, guessId)
 
             connection.on("message", (m) => {
                 publishMessage("mes", (m as IUtf8Message).utf8Data, isHostUser, guessId)
