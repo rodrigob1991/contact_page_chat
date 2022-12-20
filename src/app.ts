@@ -1,9 +1,8 @@
 import ws, {IUtf8Message} from "websocket"
-import { createClient } from 'redis'
+import {createClient} from 'redis'
 import http from "http"
 import dotenv from "dotenv"
-import { v4 as uuidv4 } from 'uuid'
-import {throws} from "assert"
+import {v4 as uuidv4} from 'uuid'
 
 type UserType = "host" | "guess"
 
@@ -28,9 +27,11 @@ type InboundMessage = InboundFromHostMesMessage | InboundFromHostAckMessage | In
 
 //type HostGuess<T extends string> = T extends string ? `${T}-host` |  `${T}-guess` : never
 type MessagePrefix = "con" | "dis" | "mes" | "ack"
-type SendMessage = (mp: MessagePrefix, payload?: string) => void
-type SubscribeToMessages = (sendMessage: SendMessage, userType: UserType, guessId?: string) => void
-type PublishMessage = (mp: MessagePrefix, payload: string, userType: UserType, guessId?: string) => void
+type SendMessage = (mp: MessagePrefix, payload: string) => void
+type SubscribeToMessages = (sendMessage: SendMessage, isHostUser: boolean, guessId?: string) => void
+type PublishMessage = (mp: MessagePrefix, payload: string, toHostUser: boolean, guessId?: string) => void
+type CacheMessage = (message: OutboundMessage, userType: UserType, guessId?: string) => void
+type IsMessageAck = (mp: MessagePrefix, messageNumber: number, userType: UserType, guessId?: string) => boolean
 
 dotenv.config()
 
@@ -55,7 +56,7 @@ const initHttpServer = () => {
 
     return httpServer
 }
-const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage: PublishMessage) => {
+const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage: PublishMessage, cacheMessage: CacheMessage, isMessageAck: IsMessageAck) => {
     const wsServer = new ws.server({
         httpServer: initHttpServer(),
         autoAcceptConnections: false
@@ -66,61 +67,89 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
     }
     wsServer.on("request", (request) => {
         const origin = request.origin
+        const date = Date.now()
         if (!originIsAllowed(origin)) {
             request.reject()
-            console.log(`${new Date()} connection from origin ${origin} rejected.`)
+            console.log(`${date} connection from origin ${origin} rejected.`)
         } else {
             const connection = request.accept("echo-protocol", origin)
-            console.log((new Date()) + " connection accepted")
+            console.log((date) + " connection accepted")
 
             const userType: UserType  = request.httpRequest.headers.host_user === process.env.HOST_USER_SECRET ? "host" : "guess"
+            const isHostUser = userType === "host"
+
             const guessId = userType === "host" ? undefined : uuidv4()
 
             const sendMessage: SendMessage = (mp, payload) => {
-                const nro = 10
                 let message: OutboundMessage
-                const toHost = userType === "host"
+                const isConnection = mp === "con"
+                const isDisconnection = mp === "dis"
+                const isMessage = mp === "mes"
+                const isAcknowledge = mp === "ack"
                 switch (true) {
-                    case mp === "con" && toHost:
-                        message = `con:${nro}:${payload}`
+                    case isConnection && isHostUser:
+                        message = `con:${payload as `${number}:${string}`}`
                         break
-                    case mp === "con" && !toHost:
-                        message = `con:${nro}`
+                    case isConnection && !isHostUser:
+                        message = `con:${payload as `${number}`}`
                         break
-                    case mp === "dis" && toHost:
-                        message = `dis:${nro}:${payload}`
+                    case isDisconnection && isHostUser:
+                        message = `dis:${payload as `${number}:${string}`}`
                         break
-                    case mp === "dis" && !toHost:
-                        message = `dis:${nro}`
+                    case isDisconnection && !isHostUser:
+                        message = `dis:${payload as `${number}`}`
                         break
-                    case mp === "mes" && toHost:
-                        message = `mes:${nro}:${payload as `${string}:${string}`}`
+                    case isMessage && isHostUser:
+                        message = `mes:${payload as `${number}:${string}:${string}`}`
                         break
-                    case mp === "mes" && !toHost:
-                        message = `mes:${nro}:${payload}`
+                    case isMessage && !isHostUser:
+                        message = `mes:${payload as `${number}:${string}`}`
                         break
-                    case mp === "ack" && toHost:
+                    case isAcknowledge && isHostUser:
                         message = `ack:${payload as `${number}`}`
                         break
-                    case mp === "ack" && !toHost:
+                    case isAcknowledge && !isHostUser:
                         message = `ack:${payload as `${number}`}`
                         break
                     default:
                         throw new Error("should had enter some case")
                 }
                 connection.sendUTF(message)
+
+                cacheMessage(message, userType, guessId)
+
+                const resendUntilAck = () => {
+                    setTimeout(() => {
+                        if (isMessageAck(guessId, nro)) {
+                            resendUntilAck()
+                        } else {
+                            connection.sendUTF(message)
+                        }
+                    }, 5000)
+                }
+                resendUntilAck()
             }
 
-            subscribeToMessages(sendMessage, userType, guessId)
-            publishMessage("con", "", userType, guessId)
+            subscribeToMessages(sendMessage, isHostUser, guessId)
+            publishMessage("con", date + ":" + (isHostUser ? "" : guessId), !isHostUser, guessId)
 
             connection.on("message", (m) => {
+                const utf8Data = (m as IUtf8Message).utf8Data as InboundMessage
+                const prefix = utf8Data.substring(0, utf8Data.indexOf(":"))
+                switch (prefix) {
+                    case "mes":
+                        break
+                    case "ack":
+                        break
+                }
+
                 publishMessage("mes", (m as IUtf8Message).utf8Data, isHostUser, guessId)
                 console.log((new Date()) + " message: " + m)
             })
             connection.on("close", (reasonCode, description) => {
-                publishMessage("dis", "", isHostUser, guessId)
-                console.log((new Date()) + " peer " + connection.remoteAddress + " disconnected.")
+                const disDate = Date.now()
+                publishMessage("dis", disDate + ":" + (isHostUser ? "" : guessId), !isHostUser, guessId)
+                console.log(disDate + " peer " + connection.remoteAddress + " disconnected.")
             })
         }
     })
@@ -131,47 +160,57 @@ const init = async () => {
 
     const suffixHost = "host"
     const suffixGuess = "guess"
-    const getConnectionsChannel = (userType: UserType) =>  "con" + "-" + (userType === "host" ? suffixHost : suffixGuess)
-    const getDisconnectionsChannel = (userType: UserType) =>  "dis" + "-" + (userType === "host" ? suffixHost : suffixGuess)
-    const getMessagesChannel = (userType: UserType, guessId?: string) => "mes" + "-" + (userType === "host" ? suffixHost : suffixGuess + "-" + guessId)
-    const getAcknowledgmentChannel = (userType: UserType, guessId?: string) => "ack" + "-" + (userType === "host" ? suffixHost : suffixGuess + "-" + guessId)
+    const getConnectionsChannel = (isHostUser: boolean) =>  "con" + "-" + (isHostUser ? suffixHost : suffixGuess)
+    const getDisconnectionsChannel = (isHostUser: boolean) =>  "dis" + "-" + (isHostUser ? suffixHost : suffixGuess)
+    const getMessagesChannel = (isHostUser: boolean, guessId?: string) => "mes" + "-" + (isHostUser ? suffixHost : suffixGuess + "-" + guessId)
+    const getAcknowledgmentChannel = (isHostUser: boolean, guessId?: string) => "ack" + "-" + (isHostUser ? suffixHost : suffixGuess + "-" + guessId)
 
-    const subscribeToMessages: SubscribeToMessages = async (sendMessage, userType, guessId) => {
+    const subscribeToMessages: SubscribeToMessages = async (sendMessage, isHostUser, guessId) => {
         const subscriber = redisClient.duplicate()
         await subscriber.connect()
 
-        await subscriber.subscribe(getConnectionsChannel(userType), (message, channel) => {
-            sendMessage("con", userType === "host" ? message : undefined)
+        await subscriber.subscribe(getConnectionsChannel(isHostUser), (message, channel) => {
+            sendMessage("con", message)
         })
-        await subscriber.subscribe(getDisconnectionsChannel(userType), (message, channel) => {
-            sendMessage("dis", userType === "host" ? message : undefined)
+        await subscriber.subscribe(getDisconnectionsChannel(isHostUser), (message, channel) => {
+            sendMessage("dis", message)
         })
-        await subscriber.subscribe(getMessagesChannel(userType, guessId), (message, channel) => {
+        await subscriber.subscribe(getMessagesChannel(isHostUser, guessId), (message, channel) => {
             sendMessage("mes", message)
         })
-        await subscriber.subscribe(getAcknowledgmentChannel(userType, guessId), (message, channel) => {
+        await subscriber.subscribe(getAcknowledgmentChannel(isHostUser, guessId), (message, channel) => {
             sendMessage("ack", message)
         })
     }
-    const publishMessage: PublishMessage = (mp, payload, userType, guessId) => {
+    const publishMessage: PublishMessage = (mp, payload, toHostUser, guessId) => {
         let channel
         switch (mp) {
             case "con":
-                channel = getConnectionsChannel(userType)
+                channel = getConnectionsChannel(toHostUser)
                 break
             case "dis":
-                channel = getDisconnectionsChannel(userType)
+                channel = getDisconnectionsChannel(toHostUser)
                 break
             case "mes":
-                channel = getMessagesChannel(userType, guessId)
+                channel = getMessagesChannel(toHostUser, guessId)
                 break
             case "ack":
-                channel = getAcknowledgmentChannel(userType, guessId)
+                channel = getAcknowledgmentChannel(toHostUser, guessId)
                 break
         }
         redisClient.publish(channel, payload)
     }
 
-    initWebSocket(subscribeToMessages, publishMessage)
+    const cacheMessage: CacheMessage = (message, userType, guessId) => {
+        const key = message.substring(0, message.)
+        redisClient.set("", message)
+
+    }
+    const isMessageAck: IsMessageAck = (mp, messageNumber, userType, guessId) => {
+
+
+    }
+
+    initWebSocket(subscribeToMessages, publishMessage, cacheMessage, isMessageAck)
 }
 
