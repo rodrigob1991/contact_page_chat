@@ -6,32 +6,82 @@ import {v4 as uuidv4} from 'uuid'
 
 type UserType = "host" | "guess"
 
-type OutboundToHostMesMessage = `mes:${number}:${string}:${string}`
-type OutboundToHostConMessage = `con:${number}:${string}`
-type OutboundToHostDisMessage = `dis:${number}:${string}`
-type OutboundToHostAckMessage = `ack:${number}`
-type OutboundToGuessMesMessage = `mes:${number}:${string}`
-type OutboundToGuessConMessage = `con:${number}`
-type OutboundToGuessDisMessage = `dis:${number}`
-type OutboundToGuessAckMessage = `ack:${number}`
-
+type Number = `${number}`
+type NumberWithGuessId = `${Number}:${string}`
+type NumberWithBody = `${Number}:${string}`
+type NumberWithGuessIdWithBody = `${NumberWithGuessId}:${string}`
+type OutboundToHostMesMessage = `mes:${NumberWithGuessIdWithBody}`
+type OutboundToHostConMessage = `con:${NumberWithGuessId}`
+type OutboundToHostDisMessage = `dis:${NumberWithGuessId}`
+type OutboundToHostAckMessage = `ack:${Number}`
+type OutboundToGuessMesMessage = `mes:${NumberWithBody}`
+type OutboundToGuessConMessage = `con:${Number}`
+type OutboundToGuessDisMessage = `dis:${Number}`
+type OutboundToGuessAckMessage = `ack:${Number}`
 type OutboundMessage = OutboundToHostMesMessage | OutboundToHostConMessage | OutboundToHostDisMessage | OutboundToHostAckMessage
     | OutboundToGuessMesMessage | OutboundToGuessConMessage | OutboundToGuessDisMessage | OutboundToGuessAckMessage
 
-type InboundFromHostMesMessage = `mes:${number}:${string}:${string}`
-type InboundFromHostAckMessage = `ack:${number}`
-type InboundFromGuessMesMessage = `mes:${number}:${string}`
-type InboundFromGuessAckMessage = `ack:${number}`
-
+type InboundFromHostMesMessage = `mes:${NumberWithGuessIdWithBody}`
+type InboundFromHostAckMessage = `ack:${Number}`
+type InboundFromGuessMesMessage = `mes:${NumberWithBody}`
+type InboundFromGuessAckMessage = `ack:${Number}`
 type InboundMessage = InboundFromHostMesMessage | InboundFromHostAckMessage | InboundFromGuessMesMessage | InboundFromGuessAckMessage
 
-//type HostGuess<T extends string> = T extends string ? `${T}-host` |  `${T}-guess` : never
+type Message = InboundMessage | OutboundMessage
+
 type MessagePrefix = "con" | "dis" | "mes" | "ack"
 type SendMessage = (mp: MessagePrefix, payload: string) => void
 type SubscribeToMessages = (sendMessage: SendMessage, isHostUser: boolean, guessId?: string) => void
 type PublishMessage = (mp: MessagePrefix, payload: string, toHostUser: boolean, guessId?: string) => void
 type CacheMessage = (message: OutboundMessage, userType: UserType, guessId?: string) => void
 type IsMessageAck = (mp: MessagePrefix, messageNumber: number, userType: UserType, guessId?: string) => boolean
+
+type MessagePart = "prefix" | "number" | "guessId" | "body"
+type MessagePartOptions<M extends Message> = {
+    [K in (Exclude<MessagePart, M extends `${MessagePrefix}:${NumberWithGuessIdWithBody}` ? "" :
+        M extends `mes:${NumberWithBody}` ? "guessId" :
+            M extends `${MessagePrefix}:${NumberWithGuessId}` ? "body" :
+                M extends `${MessagePrefix}:${Number}` ? "body" | "guessId" : never>)]? : true
+}
+const extractMessageParts = <M extends Message>(m: M, partOptions: MessagePartOptions<M>) => {
+    let beginIndex = 0
+    let endIndex = 0
+    let partCount = Object.keys(partOptions).length
+    let began = false
+    switch (true) {
+        case "prefix" in partOptions:
+            beginIndex = 0
+            began = true
+            if (partCount === 1)
+                endIndex = 3
+            partCount--
+        case "number" in partOptions:
+            if (!began) {
+                beginIndex = 4
+                began = true
+            }
+            if (partCount === 1)
+                endIndex = getIndexOnOccurrence(m, ":", 2)
+            partCount--
+        case "guessId" in partOptions:
+            if (!began) {
+                beginIndex = getIndexOnOccurrence(m, ":", 2) + 1
+                began = true
+            }
+            if (partCount === 1)
+                endIndex = getIndexOnOccurrence(m, ":", 3)
+            partCount--
+        case "body" in partOptions:
+            if (!began) {
+                beginIndex = getIndexOnOccurrence(m, ":", -1) + 1
+                began = true
+            }
+            if (partCount === 1)
+                endIndex = getIndexOnOccurrence(m, ":", m.length - 1)
+            partCount--
+    }
+    return m.substring(beginIndex, endIndex)
+}
 
 dotenv.config()
 
