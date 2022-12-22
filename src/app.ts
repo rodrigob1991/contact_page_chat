@@ -3,6 +3,7 @@ import {createClient} from 'redis'
 import http from "http"
 import dotenv from "dotenv"
 import {v4 as uuidv4} from 'uuid'
+import {getIndexOnOccurrence} from "./utils/Strings"
 
 type UserType = "host" | "guess"
 
@@ -22,7 +23,7 @@ type OutboundMessage = OutboundToHostMesMessage | OutboundToHostConMessage | Out
     | OutboundToGuessMesMessage | OutboundToGuessConMessage | OutboundToGuessDisMessage | OutboundToGuessAckMessage
 
 type InboundFromHostMesMessage = `mes:${NumberWithGuessIdWithBody}`
-type InboundFromHostAckMessage = `ack:${Number}`
+type InboundFromHostAckMessage = `ack:${NumberWithGuessId}`
 type InboundFromGuessMesMessage = `mes:${NumberWithBody}`
 type InboundFromGuessAckMessage = `ack:${Number}`
 type InboundMessage = InboundFromHostMesMessage | InboundFromHostAckMessage | InboundFromGuessMesMessage | InboundFromGuessAckMessage
@@ -33,54 +34,47 @@ type MessagePrefix = "con" | "dis" | "mes" | "ack"
 type SendMessage = (mp: MessagePrefix, payload: string) => void
 type SubscribeToMessages = (sendMessage: SendMessage, isHostUser: boolean, guessId?: string) => void
 type PublishMessage = (mp: MessagePrefix, payload: string, toHostUser: boolean, guessId?: string) => void
-type CacheMessage = (message: OutboundMessage, userType: UserType, guessId?: string) => void
-type IsMessageAck = (mp: MessagePrefix, messageNumber: number, userType: UserType, guessId?: string) => boolean
+type CacheMessage = (key: string, message: OutboundMessage) => void
+type IsMessageAck = (key: string) => Promise<boolean>
 
 type MessagePart = "prefix" | "number" | "guessId" | "body"
-type MessagePartOptions<M extends Message> = {
-    [K in (Exclude<MessagePart, M extends `${MessagePrefix}:${NumberWithGuessIdWithBody}` ? "" :
-        M extends `mes:${NumberWithBody}` ? "guessId" :
-            M extends `${MessagePrefix}:${NumberWithGuessId}` ? "body" :
-                M extends `${MessagePrefix}:${Number}` ? "body" | "guessId" : never>)]? : true
-}
-const extractMessageParts = <M extends Message>(m: M, partOptions: MessagePartOptions<M>) => {
-    let beginIndex = 0
-    let endIndex = 0
-    let partCount = Object.keys(partOptions).length
-    let began = false
+type SpecificMessagePart<M extends Message> = Exclude<MessagePart, M extends `${MessagePrefix}:${NumberWithGuessIdWithBody}` ? "" :
+    M extends `mes:${NumberWithBody}` ? "guessId" :
+        M extends `${MessagePrefix}:${NumberWithGuessId}` ? "body" :
+            M extends `${MessagePrefix}:${Number}` ? "body" | "guessId" : never>
+type WhatMessagePartsGet<M extends Message> = { [K in SpecificMessagePart<M>]?: true }
+type HasFourParts<M extends Message> = M extends `${MessagePrefix}:${NumberWithGuessIdWithBody}` ? true : false
+type GotMessageParts<WMPE extends WhatMessagePartsGet<Message>> = { [K in keyof WMPE] : string }
+
+const getMessageParts = <M extends Message, WMPE extends WhatMessagePartsGet<M>>(m: M, whatGet: WMPE, hasFourParts: HasFourParts<M>) => {
+    const messageParts: any = {}
+    const getPartSeparatorIndex = (occurrence: number) => getIndexOnOccurrence(m, ":", occurrence)
     switch (true) {
-        case "prefix" in partOptions:
-            beginIndex = 0
-            began = true
-            if (partCount === 1)
-                endIndex = 3
-            partCount--
-        case "number" in partOptions:
-            if (!began) {
-                beginIndex = 4
-                began = true
-            }
-            if (partCount === 1)
-                endIndex = getIndexOnOccurrence(m, ":", 2)
-            partCount--
-        case "guessId" in partOptions:
-            if (!began) {
-                beginIndex = getIndexOnOccurrence(m, ":", 2) + 1
-                began = true
-            }
-            if (partCount === 1)
-                endIndex = getIndexOnOccurrence(m, ":", 3)
-            partCount--
-        case "body" in partOptions:
-            if (!began) {
-                beginIndex = getIndexOnOccurrence(m, ":", -1) + 1
-                began = true
-            }
-            if (partCount === 1)
-                endIndex = getIndexOnOccurrence(m, ":", m.length - 1)
-            partCount--
+        case "prefix" in whatGet:
+            messageParts["prefix"] = m.substring(0, 3)
+        case "number" in whatGet:
+            messageParts["number"] = m.substring(4, getPartSeparatorIndex(2))
+        case "guessId" in whatGet:
+            messageParts["guessId"] = m.substring(getPartSeparatorIndex(2) + 1, getPartSeparatorIndex(3))
+        case "body" in whatGet:
+            messageParts["body"] = m.substring(getPartSeparatorIndex(hasFourParts ? 3 : 2) + 1, m.length - 1)
     }
-    return m.substring(beginIndex, endIndex)
+    return messageParts as GotMessageParts<WMPE>
+}
+const getCutMessage = <M extends Message>(m: M, whatCut: WhatMessagePartsGet<M>, hasFourParts: HasFourParts<M>) => {
+    let cutMessage = ""
+    const getPartSeparatorIndex = (occurrence: number) => getIndexOnOccurrence(m, ":", occurrence)
+    switch (true) {
+        case !("prefix" in whatCut):
+            cutMessage += m.substring(0, 3)
+        case !("number" in whatCut):
+            cutMessage += m.substring(4, getPartSeparatorIndex(2))
+        case !("guessId" in whatCut):
+            cutMessage += m.substring(getPartSeparatorIndex(2) + 1, getPartSeparatorIndex(3))
+        case !("body" in whatCut):
+            cutMessage += m.substring(getPartSeparatorIndex(hasFourParts ? 3 : 2) + 1, m.length - 1)
+    }
+    return cutMessage
 }
 
 dotenv.config()
@@ -131,6 +125,7 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
             const guessId = userType === "host" ? undefined : uuidv4()
 
             const sendMessage: SendMessage = (mp, payload) => {
+                let messageKey = userType + ":"
                 let message: OutboundMessage
                 const isConnection = mp === "con"
                 const isDisconnection = mp === "dis"
@@ -138,43 +133,52 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
                 const isAcknowledge = mp === "ack"
                 switch (true) {
                     case isConnection && isHostUser:
-                        message = `con:${payload as `${number}:${string}`}`
+                        message = `con:${payload as NumberWithGuessId}`
+                        messageKey += message
                         break
                     case isConnection && !isHostUser:
-                        message = `con:${payload as `${number}`}`
+                        message = `con:${payload as Number}`
+                        messageKey += guessId + ":" + message
                         break
                     case isDisconnection && isHostUser:
-                        message = `dis:${payload as `${number}:${string}`}`
+                        message = `dis:${payload as NumberWithGuessId}`
+                        messageKey += message
                         break
                     case isDisconnection && !isHostUser:
-                        message = `dis:${payload as `${number}`}`
+                        message = `dis:${payload as Number}`
+                        messageKey += guessId + ":" + message
                         break
                     case isMessage && isHostUser:
-                        message = `mes:${payload as `${number}:${string}:${string}`}`
+                        message = `mes:${payload as NumberWithGuessIdWithBody}`
+                        messageKey += getCutMessage(message, {body: true}, true)
                         break
                     case isMessage && !isHostUser:
-                        message = `mes:${payload as `${number}:${string}`}`
+                        message = `mes:${payload as NumberWithBody}`
+                        messageKey += guessId + ":" + getCutMessage(message, {body: true}, false)
                         break
                     case isAcknowledge && isHostUser:
-                        message = `ack:${payload as `${number}`}`
+                        message = `ack:${payload as Number}`
+                        messageKey += message
                         break
                     case isAcknowledge && !isHostUser:
-                        message = `ack:${payload as `${number}`}`
+                        message = `ack:${payload as Number}`
+                        messageKey += guessId + ":" + message
                         break
                     default:
                         throw new Error("should had enter some case")
                 }
                 connection.sendUTF(message)
-
-                cacheMessage(message, userType, guessId)
-
+                cacheMessage(messageKey, message)
                 const resendUntilAck = () => {
                     setTimeout(() => {
-                        if (isMessageAck(guessId, nro)) {
-                            resendUntilAck()
-                        } else {
-                            connection.sendUTF(message)
-                        }
+                        isMessageAck(messageKey).then(is => {
+                            if (is) {
+                                resendUntilAck()
+                            } else {
+                                connection.sendUTF(message)
+                            }
+                        })
+
                     }, 5000)
                 }
                 resendUntilAck()
@@ -251,15 +255,8 @@ const init = async () => {
         redisClient.publish(channel, payload)
     }
 
-    const cacheMessage: CacheMessage = (message, userType, guessId) => {
-        const key = message.substring(0, message.)
-        redisClient.set("", message)
-
-    }
-    const isMessageAck: IsMessageAck = (mp, messageNumber, userType, guessId) => {
-
-
-    }
+    const cacheMessage: CacheMessage = (key, message) => { redisClient.set(key, message) }
+    const isMessageAck: IsMessageAck = async (key) => await redisClient.get(key) !== null
 
     initWebSocket(subscribeToMessages, publishMessage, cacheMessage, isMessageAck)
 }
