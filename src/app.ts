@@ -19,16 +19,20 @@ type OutboundToGuessMesMessage = `mes:${NumberWithBody}`
 type OutboundToGuessConMessage = `con:${Number}`
 type OutboundToGuessDisMessage = `dis:${Number}`
 type OutboundToGuessAckMessage = `ack:${Number}`
-type OutboundMessage = OutboundToHostMesMessage | OutboundToHostConMessage | OutboundToHostDisMessage | OutboundToHostAckMessage
-    | OutboundToGuessMesMessage | OutboundToGuessConMessage | OutboundToGuessDisMessage | OutboundToGuessAckMessage
-
+type OutboundMesMessage<UT extends UserType> = UT extends "host" ? OutboundToHostMesMessage : OutboundToGuessMesMessage
+type OutboundAckMessage<UT extends UserType> = UT extends "host" ? OutboundToHostAckMessage : OutboundToGuessAckMessage
+type OutboundConMessage<UT extends UserType> = UT extends "host" ? OutboundToHostConMessage : OutboundToGuessConMessage
+type OutboundDisMessage<UT extends UserType> = UT extends "host" ? OutboundToHostDisMessage : OutboundToGuessDisMessage
+type OutboundMessage<UT extends UserType> = OutboundMesMessage<UT> | OutboundConMessage<UT> | OutboundDisMessage<UT> | OutboundAckMessage<UT>
 type InboundFromHostMesMessage = `mes:${NumberWithGuessIdWithBody}`
 type InboundFromHostAckMessage = `ack:${NumberWithGuessId}`
 type InboundFromGuessMesMessage = `mes:${NumberWithBody}`
 type InboundFromGuessAckMessage = `ack:${Number}`
-type InboundMessage = InboundFromHostMesMessage | InboundFromHostAckMessage | InboundFromGuessMesMessage | InboundFromGuessAckMessage
+type InboundMesMessage<UT extends UserType> = UT extends "host" ? InboundFromHostMesMessage : InboundFromGuessMesMessage
+type InboundAckMessage<UT extends UserType> = UT extends "host" ? InboundFromHostAckMessage : InboundFromGuessAckMessage
+type InboundMessage<UT extends UserType> = InboundMesMessage<UT> | InboundAckMessage<UT>
 
-type Message = InboundMessage | OutboundMessage
+type Message<UT extends UserType> = InboundMessage<UT> | OutboundMessage<UT>
 
 type MessagePrefix = "con" | "dis" | "mes" | "ack"
 type SendMessage = (mp: MessagePrefix, payload: string) => void
@@ -172,10 +176,9 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
                 const resendUntilAck = () => {
                     setTimeout(() => {
                         isMessageAck(messageKey).then(is => {
-                            if (is) {
-                                resendUntilAck()
-                            } else {
+                            if (!is) {
                                 connection.sendUTF(message)
+                                resendUntilAck()
                             }
                         })
 
@@ -187,10 +190,42 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
             subscribeToMessages(sendMessage, isHostUser, guessId)
             publishMessage("con", date + ":" + (isHostUser ? "" : guessId), !isHostUser, guessId)
 
+            type HandleInboundMesMessage<UT extends UserType> = (m: UT extends "host" ? InboundFromHostMesMessage : InboundFromGuessMesMessage) => void
+            type HandleInboundAckMessage<UT extends UserType> = (a: UT extends "host" ? InboundFromHostAckMessage : InboundFromGuessAckMessage) => void
+            const handleInboundMessage = <UT extends UserType>(m: ws.Message, handleInboundMesMessage:  HandleInboundMesMessage<UT>,handleInboundAckMessage: HandleInboundAckMessage<UT>) => {
+                const utf8Data = (m as IUtf8Message).utf8Data as InboundMessage
+                const prefix = utf8Data.substring(0, utf8Data.indexOf(":")) as "mes" | "ack"
+                switch (prefix) {
+                    case "mes":
+                        handleInboundMesMessage(utf8Data as InboundFromHostMesMessage | InboundFromGuessMesMessage)
+                        break
+                    case "ack":
+                        handleAckMessage(utf8Data as InboundFromHostAckMessage | InboundFromGuessAckMessage)
+                        break
+                }
+            }
+            const handleMessageFromHost = (m: ws.Message) => {
+                const handleMesMessage = (m: InboundFromHostMesMessage) => {
+                }
+                const handleAckMessage = (a: InboundFromHostAckMessage) => {
+                }
+                handleMessage(m, handleMesMessage, handleAckMessage)
+            }
+            const handleMessageFromGuess = (m: ws.Message)=> {
+                const utf8Data = (m as IUtf8Message).utf8Data as InboundMessage
+                const prefix = getMessagePrefix(utf8Data)
+                switch (prefix) {
+
+                }
+
+            }
+
+
             connection.on("message", (m) => {
                 const utf8Data = (m as IUtf8Message).utf8Data as InboundMessage
                 const prefix = utf8Data.substring(0, utf8Data.indexOf(":"))
-                switch (prefix) {
+                const is
+                switch (true) {
                     case "mes":
                         break
                     case "ack":
@@ -256,7 +291,7 @@ const init = async () => {
     }
 
     const cacheMessage: CacheMessage = (key, message) => { redisClient.set(key, message) }
-    const isMessageAck: IsMessageAck = async (key) => await redisClient.get(key) !== null
+    const isMessageAck: IsMessageAck = async (key) => await redisClient.get(key) === null
 
     initWebSocket(subscribeToMessages, publishMessage, cacheMessage, isMessageAck)
 }
