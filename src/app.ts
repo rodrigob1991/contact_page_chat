@@ -6,6 +6,7 @@ import {v4 as uuidv4} from 'uuid'
 import {getIndexOnOccurrence} from "./utils/Strings"
 
 type UserType = "host" | "guess"
+type MessagePrefix = "con" | "dis" | "mes" | "ack"
 
 type Number = `${number}`
 type NumberWithGuessId = `${Number}:${string}`
@@ -31,26 +32,32 @@ type InboundFromGuessAckMessage = `ack:${Number}`
 type InboundMesMessage<UT extends UserType> = UT extends "host" ? InboundFromHostMesMessage : InboundFromGuessMesMessage
 type InboundAckMessage<UT extends UserType> = UT extends "host" ? InboundFromHostAckMessage : InboundFromGuessAckMessage
 type InboundMessage<UT extends UserType> = InboundMesMessage<UT> | InboundAckMessage<UT>
+type HandleMesMessage<UT extends UserType> = (m: InboundMesMessage<UT>) => void
+type HandleAckMessage<UT extends UserType> = (a: InboundAckMessage<UT> ) => void
 
 type Message<UT extends UserType> = InboundMessage<UT> | OutboundMessage<UT>
-
-type MessagePrefix = "con" | "dis" | "mes" | "ack"
+type MessageKey<UT extends UserType> = `${UT}:${string}`
+type GetConMessageAndKey<UT extends UserType> = () => [OutboundConMessage<UT>, MessageKey<UT>]
+type GetDisMessageAndKey<UT extends UserType> = () => [OutboundDisMessage<UT>, MessageKey<UT>]
+type GetMesMessageAndKey<UT extends UserType> = () => [OutboundMesMessage<UT>, MessageKey<UT>]
+type GetAckMessageAndKey<UT extends UserType> = () => [OutboundAckMessage<UT>, MessageKey<UT>]
 type SendMessage = (mp: MessagePrefix, payload: string) => void
 type SubscribeToMessages = (sendMessage: SendMessage, isHostUser: boolean, guessId?: string) => void
-type PublishMessage = (mp: MessagePrefix, payload: string, toHostUser: boolean, guessId?: string) => void
-type CacheMessage = (key: string, message: OutboundMessage) => void
-type IsMessageAck = (key: string) => Promise<boolean>
+type PublishMessage = <B extends boolean>(mp: MessagePrefix, payload: string, toHostUser: B, toGuessId: B extends false ? string : undefined) => void
+type CacheMessage = <UT extends UserType>(key: MessageKey<UT>, message: OutboundMessage<UT>) => void
+type RemoveAckMess age = <UT extends UserType>(key: MessageKey<UT>, message: OutboundMessage<UT>) => void
+type IsMessageAck = <UT extends UserType>(key: MessageKey<UT>) => Promise<boolean>
 
 type MessagePart = "prefix" | "number" | "guessId" | "body"
-type SpecificMessagePart<M extends Message> = Exclude<MessagePart, M extends `${MessagePrefix}:${NumberWithGuessIdWithBody}` ? "" :
+type SpecificMessagePart<M extends Message<UserType>> = Exclude<MessagePart, M extends `${MessagePrefix}:${NumberWithGuessIdWithBody}` ? "" :
     M extends `mes:${NumberWithBody}` ? "guessId" :
         M extends `${MessagePrefix}:${NumberWithGuessId}` ? "body" :
             M extends `${MessagePrefix}:${Number}` ? "body" | "guessId" : never>
-type WhatMessagePartsGet<M extends Message> = { [K in SpecificMessagePart<M>]?: true }
-type HasFourParts<M extends Message> = M extends `${MessagePrefix}:${NumberWithGuessIdWithBody}` ? true : false
-type GotMessageParts<WMPE extends WhatMessagePartsGet<Message>> = { [K in keyof WMPE] : string }
+type WhatMessagePartsGet<M extends Message<UserType>> = { [K in SpecificMessagePart<M>]?: true }
+type HasFourParts<M extends Message<UserType>> = M extends `${MessagePrefix}:${NumberWithGuessIdWithBody}` ? true : false
+type GotMessageParts<M extends Message<UserType>> = { [K in keyof WhatMessagePartsGet<M>]-? : string }
 
-const getMessageParts = <M extends Message, WMPE extends WhatMessagePartsGet<M>>(m: M, whatGet: WMPE, hasFourParts: HasFourParts<M>) => {
+const getMessageParts = <M extends Message<UserType>>(m: M, whatGet: WhatMessagePartsGet<M>, hasFourParts: HasFourParts<M>) => {
     const messageParts: any = {}
     const getPartSeparatorIndex = (occurrence: number) => getIndexOnOccurrence(m, ":", occurrence)
     switch (true) {
@@ -63,9 +70,9 @@ const getMessageParts = <M extends Message, WMPE extends WhatMessagePartsGet<M>>
         case "body" in whatGet:
             messageParts["body"] = m.substring(getPartSeparatorIndex(hasFourParts ? 3 : 2) + 1, m.length - 1)
     }
-    return messageParts as GotMessageParts<WMPE>
+    return messageParts as GotMessageParts<M>
 }
-const getCutMessage = <M extends Message>(m: M, whatCut: WhatMessagePartsGet<M>, hasFourParts: HasFourParts<M>) => {
+const getCutMessage = <M extends Message<UserType>>(m: M, whatCut: WhatMessagePartsGet<M>, hasFourParts: HasFourParts<M>) => {
     let cutMessage = ""
     const getPartSeparatorIndex = (occurrence: number) => getIndexOnOccurrence(m, ":", occurrence)
     switch (true) {
@@ -128,56 +135,79 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
 
             const guessId = userType === "host" ? undefined : uuidv4()
 
-            const sendMessage: SendMessage = (mp, payload) => {
-                let messageKey = userType + ":"
-                let message: OutboundMessage
-                const isConnection = mp === "con"
-                const isDisconnection = mp === "dis"
-                const isMessage = mp === "mes"
-                const isAcknowledge = mp === "ack"
-                switch (true) {
-                    case isConnection && isHostUser:
-                        message = `con:${payload as NumberWithGuessId}`
-                        messageKey += message
+            const sendMessageHost: SendMessage = (mp, payload) => {
+                const getConMessageAndKey: GetConMessageAndKey<"host"> = () => {
+                    const message: OutboundToHostConMessage = `con:${payload as NumberWithGuessId}`
+                    const key: MessageKey<"host"> = `host:${message}`
+                    return [message, key]
+                }
+                const getDisMessageAndKey: GetDisMessageAndKey<"host"> = () => {
+                    const message: OutboundToHostDisMessage = `dis:${payload as NumberWithGuessId}`
+                    const key: MessageKey<"host"> = `host:${message}`
+                    return [message, key]
+                }
+                const getMesMessageAndKey: GetMesMessageAndKey<"host"> = () => {
+                    const message: OutboundToHostMesMessage = `mes:${payload as NumberWithGuessIdWithBody}`
+                    const key: MessageKey<"host"> = `host:${getCutMessage(message, {body: true}, true)}`
+                    return [message, key]
+                }
+                const getAckMessageAndKey: GetAckMessageAndKey<"host"> = () => {
+                    const message: OutboundToHostAckMessage = `ack:${payload as Number}`
+                    const key: MessageKey<"host"> = `host:${message}`
+                    return [message, key]
+                }
+                sendMessage(mp, getConMessageAndKey, getDisMessageAndKey, getMesMessageAndKey, getAckMessageAndKey)
+
+            }
+            const sendMessageGuess: SendMessage = (mp, payload) => {
+                const getConMessageAndKey: GetConMessageAndKey<"guess"> = () => {
+                    const message: OutboundToGuessConMessage = `con:${payload as Number}`
+                    const key: MessageKey<"guess"> = `guess:${guessId}:${message}`
+                    return [message, key]
+                }
+                const getDisMessageAndKey: GetDisMessageAndKey<"guess"> = () => {
+                    const message: OutboundToGuessDisMessage = `dis:${payload as Number}`
+                    const key: MessageKey<"guess"> = `guess:${guessId}:${message}`
+                    return [message, key]
+                }
+                const getMesMessageAndKey: GetMesMessageAndKey<"guess"> = () => {
+                    const message: OutboundToGuessMesMessage = `mes:${payload as NumberWithBody}`
+                    const key: MessageKey<"guess"> = `guess:${guessId}:${getCutMessage(message, {body: true}, false)}`
+                    return [message, key]
+                }
+                const getAckMessageAndKey: GetAckMessageAndKey<"guess"> = () => {
+                    const message: OutboundToGuessAckMessage = `ack:${payload as Number}`
+                    const key: MessageKey<"guess"> = `guess:${guessId}:${message}`
+                    return [message, key]
+                }
+                sendMessage(mp, getConMessageAndKey, getDisMessageAndKey, getMesMessageAndKey, getAckMessageAndKey)
+            }
+
+            const sendMessage = <UT extends UserType>(mp: MessagePrefix, getConMessageAndKey: GetConMessageAndKey<UT>, getDisMessageAndKey: GetDisMessageAndKey<UT>, getMesMessageAndKey: GetMesMessageAndKey<UT>,getAckMessageAndKey: GetAckMessageAndKey<UT>) => {
+                let message : OutboundMessage<UT>
+                let key: MessageKey<UT>
+                switch (mp) {
+                    case "con":
+                        [message, key] = getConMessageAndKey()
                         break
-                    case isConnection && !isHostUser:
-                        message = `con:${payload as Number}`
-                        messageKey += guessId + ":" + message
+                    case "dis":
+                        [message, key] = getDisMessageAndKey()
                         break
-                    case isDisconnection && isHostUser:
-                        message = `dis:${payload as NumberWithGuessId}`
-                        messageKey += message
+                    case "mes":
+                        [message, key] = getMesMessageAndKey()
                         break
-                    case isDisconnection && !isHostUser:
-                        message = `dis:${payload as Number}`
-                        messageKey += guessId + ":" + message
-                        break
-                    case isMessage && isHostUser:
-                        message = `mes:${payload as NumberWithGuessIdWithBody}`
-                        messageKey += getCutMessage(message, {body: true}, true)
-                        break
-                    case isMessage && !isHostUser:
-                        message = `mes:${payload as NumberWithBody}`
-                        messageKey += guessId + ":" + getCutMessage(message, {body: true}, false)
-                        break
-                    case isAcknowledge && isHostUser:
-                        message = `ack:${payload as Number}`
-                        messageKey += message
-                        break
-                    case isAcknowledge && !isHostUser:
-                        message = `ack:${payload as Number}`
-                        messageKey += guessId + ":" + message
+                    case "ack":
+                        [message, key] = getAckMessageAndKey()
                         break
                     default:
                         throw new Error("should had enter some case")
                 }
-                connection.sendUTF(message)
-                cacheMessage(messageKey, message)
+                cacheMessage<UT>(key, message)
                 const resendUntilAck = () => {
+                    connection.sendUTF(message)
                     setTimeout(() => {
-                        isMessageAck(messageKey).then(is => {
+                        isMessageAck(key).then(is => {
                             if (!is) {
-                                connection.sendUTF(message)
                                 resendUntilAck()
                             }
                         })
@@ -187,54 +217,45 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
                 resendUntilAck()
             }
 
-            subscribeToMessages(sendMessage, isHostUser, guessId)
+            subscribeToMessages(isHostUser ? sendMessageHost : sendMessageGuess, isHostUser, guessId)
             publishMessage("con", date + ":" + (isHostUser ? "" : guessId), !isHostUser, guessId)
 
-            type HandleInboundMesMessage<UT extends UserType> = (m: UT extends "host" ? InboundFromHostMesMessage : InboundFromGuessMesMessage) => void
-            type HandleInboundAckMessage<UT extends UserType> = (a: UT extends "host" ? InboundFromHostAckMessage : InboundFromGuessAckMessage) => void
-            const handleInboundMessage = <UT extends UserType>(m: ws.Message, handleInboundMesMessage:  HandleInboundMesMessage<UT>,handleInboundAckMessage: HandleInboundAckMessage<UT>) => {
-                const utf8Data = (m as IUtf8Message).utf8Data as InboundMessage
+            const handleMessage = <UT extends UserType>(m: ws.Message, handleMesMessage: HandleMesMessage<UT>, handleAckMessage: HandleAckMessage<UT>) => {
+                const utf8Data = (m as IUtf8Message).utf8Data as InboundMessage<UT>
                 const prefix = utf8Data.substring(0, utf8Data.indexOf(":")) as "mes" | "ack"
                 switch (prefix) {
                     case "mes":
-                        handleInboundMesMessage(utf8Data as InboundFromHostMesMessage | InboundFromGuessMesMessage)
+                        handleMesMessage(utf8Data as InboundMesMessage<UT>)
                         break
                     case "ack":
-                        handleAckMessage(utf8Data as InboundFromHostAckMessage | InboundFromGuessAckMessage)
+                        handleAckMessage(utf8Data as InboundAckMessage<UT>)
                         break
                 }
+                console.log((new Date()) + " message: " + m)
             }
             const handleMessageFromHost = (m: ws.Message) => {
-                const handleMesMessage = (m: InboundFromHostMesMessage) => {
+                const handleMesMessage: HandleMesMessage<"host"> = (m) => {
+                    const {number, guessId: toGuessId, body} = getMessageParts(m, {number: true, guessId: true, body: true}, true)
+                    publishMessage("mes", number + ":" + body, false, toGuessId)
                 }
-                const handleAckMessage = (a: InboundFromHostAckMessage) => {
+                const handleAckMessage: HandleAckMessage<"host"> = (a) => {
+                    const {number, guessId: toGuessId} = getMessageParts(a, {number: true, guessId: true}, false)
+                    publishMessage("ack", number, false, toGuessId)
                 }
                 handleMessage(m, handleMesMessage, handleAckMessage)
             }
-            const handleMessageFromGuess = (m: ws.Message)=> {
-                const utf8Data = (m as IUtf8Message).utf8Data as InboundMessage
-                const prefix = getMessagePrefix(utf8Data)
-                switch (prefix) {
-
+            const handleMessageFromGuess = (m: ws.Message) => {
+                const handleMesMessage: HandleMesMessage<"guess"> = (m) => {
+                    const {number, body} = getMessageParts(m, {number: true, body: true}, false)
+                    publishMessage("mes", number + ":" + guessId + ":" + body, true, undefined)
                 }
-
+                const handleAckMessage: HandleAckMessage<"guess"> = (a) => {
+                    const {number} = getMessageParts(a, {number: true}, false)
+                    publishMessage("ack", number, true, undefined)
+                }
+                handleMessage(m, handleMesMessage, handleAckMessage)
             }
-
-
-            connection.on("message", (m) => {
-                const utf8Data = (m as IUtf8Message).utf8Data as InboundMessage
-                const prefix = utf8Data.substring(0, utf8Data.indexOf(":"))
-                const is
-                switch (true) {
-                    case "mes":
-                        break
-                    case "ack":
-                        break
-                }
-
-                publishMessage("mes", (m as IUtf8Message).utf8Data, isHostUser, guessId)
-                console.log((new Date()) + " message: " + m)
-            })
+            connection.on("message", isHostUser ? handleMessageFromHost : handleMessageFromGuess)
             connection.on("close", (reasonCode, description) => {
                 const disDate = Date.now()
                 publishMessage("dis", disDate + ":" + (isHostUser ? "" : guessId), !isHostUser, guessId)
@@ -271,7 +292,7 @@ const init = async () => {
             sendMessage("ack", message)
         })
     }
-    const publishMessage: PublishMessage = (mp, payload, toHostUser, guessId) => {
+    const publishMessage: PublishMessage = (mp, payload, toHostUser, toGuessId) => {
         let channel
         switch (mp) {
             case "con":
@@ -281,10 +302,10 @@ const init = async () => {
                 channel = getDisconnectionsChannel(toHostUser)
                 break
             case "mes":
-                channel = getMessagesChannel(toHostUser, guessId)
+                channel = getMessagesChannel(toHostUser, toGuessId)
                 break
             case "ack":
-                channel = getAcknowledgmentChannel(toHostUser, guessId)
+                channel = getAcknowledgmentChannel(toHostUser, toGuessId)
                 break
         }
         redisClient.publish(channel, payload)
