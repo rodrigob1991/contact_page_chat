@@ -6,11 +6,11 @@ import {v4 as uuidv4} from 'uuid'
 import {getIndexOnOccurrence} from "./utils/Strings"
 
 //generic types
-type GetTypesStartOnPrefix<TYPES extends string, PREFIXES extends string> = { [P in PREFIXES]: { [T in TYPES as P]: T extends `${PREFIXES}${string}` ? T : never }[P] }[PREFIXES]
+type GetTypesStartOnPrefix<TYPES extends string, PREFIXES extends string> = { [T in TYPES ]: T extends `${PREFIXES}${any}` ? T : never }[TYPES]
 //type GetUnionsIfExtend<T, S extends T[]>
 type UserType = "host" | "guess"
 type MessageFlow = "in" | "out"
-type MessagePrefix<MF extends MessageFlow> = "mes" | "ack" | ("out" extends MF ? "con" | "dis" : never)
+type MessagePrefix<MF extends MessageFlow=MessageFlow> = "mes" | "ack" | ("out" extends MF ? "con" | "dis" : never)
 /*type MessageParts<MF extends MessageFlow, UT extends UserType, MP extends MessagePrefix<MF>> =
     { prefix: MP }
     & ("ack" extends MP ? "in" extends MF ? { originPrefix: MessagePrefix<"out"> } : {} : {})
@@ -19,13 +19,21 @@ type MessagePrefix<MF extends MessageFlow> = "mes" | "ack" | ("out" extends MF ?
     & ("mes" extends MP ? { body: string } : {})*/
 type MessageParts = { prefix: MessagePrefix<MessageFlow>, originPrefix: MessagePrefix<"out">, number: number, guessId: string, body: string }
 type MessagePartsKeys = keyof MessageParts
-type MessagePartsPositions<MF extends MessageFlow, UT extends UserType, MP extends MessagePrefix<MF>, MPK extends MessagePartsKeys<MF, UT, MP> = MessagePartsKeys<MF, UT, MP>> = {
+/*type MessagePartsPositions<MF extends MessageFlow, UT extends UserType, MP extends MessagePrefix<MF>, MPK extends MessagePartsKeys<MF, UT, MP> = MessagePartsKeys<MF, UT, MP>> = {
     [K in MPK]: K extends "prefix" ? 1 : K extends "originPrefix" ? 2 : K extends "number" ? "originPrefix" extends MPK ? 3 : 2 : K extends "guessId" ? "originPrefix" extends MPK ? 4 : 3 : K extends "body" ? "guessId" extends MPK ? 4 : 3 : never
-}
-
-type PartTemplate<MPK extends MessagePartsKeys, MPKS extends MessagePartsKeys> = MPK extends keyof MPKS ? `:${MessageParts[MPK]}` : ""
+}*/
+type PartTemplate<MPK extends MessagePartsKeys, MPKS extends MessagePartsKeys> = MPK extends MPKS ? `:${MessageParts[MPK]}` : ""
 type MessageTemplate<MF extends MessageFlow, MP extends MessagePrefix<MF>, MPKS extends MessagePartsKeys> =
-    `${MP}${PartTemplate<"originPrefix",  MPKS> }${PartTemplate<"number",MPKS>}${PartTemplate<"guessId", MPKS>}${PartTemplate<"body", MPKS>}`
+    `${MP}${PartTemplate<"originPrefix", MPKS>}${PartTemplate<"number", MPKS>}${PartTemplate<"guessId", MPKS>}${PartTemplate<"body", MPKS>}`
+
+type MessagePartsPositions<M extends Message> =
+    { prefix: 1 } & (M extends  `${MessageTemplate<"in", "ack", "originPrefix" | "number">}${any}` ?
+    { originPrefix: 2, number: 3 } & (M extends MessageTemplate<"in", "ack", "originPrefix" | "number" | "guessId"> ? {guessId: 4} : {}) :
+    { number: 2 } & (M extends `${"mes"}:${any}` ?
+    M extends MessageTemplate<MessageFlow, "mes", "number" | "guessId" | "body"> ?
+        {guessId: 3, body: 4} :
+        {body: 3} :
+    M extends MessageTemplate<MessageFlow, MessagePrefix, "number" | "guessId"> ? {guessId: 3} : {}))
 
 type OutboundToHostMesMessage = MessageTemplate<"out", "mes", "number" | "guessId" | "body">
 type OutboundToHostConMessage = MessageTemplate<"out","con", "number" | "guessId">
@@ -49,7 +57,7 @@ type InboundMesMessage<UT extends UserType> = UT extends "host" ? InboundFromHos
 type InboundAckMessage<UT extends UserType> = UT extends "host" ? InboundFromHostAckMessage : InboundFromGuessAckMessage
 type InboundMessage<UT extends UserType, MP extends MessagePrefix<"in">> = GetTypesStartOnPrefix<InboundMesMessage<UT> | InboundAckMessage<UT>, MP>
 
-type Message<MF extends MessageFlow, UT extends UserType, MP extends MessagePrefix<MF>> = ("in" extends MF ? InboundMessage<UT,Exclude<MP,MessagePrefix<"out">>> : never)  | ("out" extends MF ? OutboundMessage<UT,Exclude<MP,MessagePrefix<"in">>> : never)
+type Message<MF extends MessageFlow=MessageFlow, UT extends UserType=UserType, MP extends MessagePrefix<MF>=MessagePrefix<MF>> = ("in" extends MF ? InboundMessage<UT, Exclude<MP, "con" | "dis">> : never)  | ("out" extends MF ? OutboundMessage<UT,MP> : never)
 
 type HandleMesMessage<UT extends UserType> = (m: InboundMesMessage<UT>) => void
 type HandleAckMessage<UT extends UserType> = (a: InboundAckMessage<UT> ) => void
