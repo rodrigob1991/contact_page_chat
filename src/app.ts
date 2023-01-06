@@ -17,14 +17,12 @@ type MessagePrefix<MF extends MessageFlow=MessageFlow> = "mes" | "ack" | ("out" 
     & { number: number }
     & ("host" extends UT ? MP extends "ack" ? {} : { guessId: string } : {})
     & ("mes" extends MP ? { body: string } : {})*/
-type MessageParts = { prefix: MessagePrefix<MessageFlow>, originPrefix: MessagePrefix<"out">, number: number, guessId: string, body: string }
+type MessageParts = { prefix: MessagePrefix, originPrefix: MessagePrefix<"out">, number: number, guessId: string, body: string }
 type MessagePartsKeys = keyof MessageParts
-/*type MessagePartsPositions<MF extends MessageFlow, UT extends UserType, MP extends MessagePrefix<MF>, MPK extends MessagePartsKeys<MF, UT, MP> = MessagePartsKeys<MF, UT, MP>> = {
-    [K in MPK]: K extends "prefix" ? 1 : K extends "originPrefix" ? 2 : K extends "number" ? "originPrefix" extends MPK ? 3 : 2 : K extends "guessId" ? "originPrefix" extends MPK ? 4 : 3 : K extends "body" ? "guessId" extends MPK ? 4 : 3 : never
-}*/
-type PartTemplate<MPK extends MessagePartsKeys, MPKS extends MessagePartsKeys> = MPK extends MPKS ? `:${MessageParts[MPK]}` : ""
-type MessageTemplate<MF extends MessageFlow, MP extends MessagePrefix<MF>, MPKS extends MessagePartsKeys> =
-    `${MP}${PartTemplate<"originPrefix", MPKS>}${PartTemplate<"number", MPKS>}${PartTemplate<"guessId", MPKS>}${PartTemplate<"body", MPKS>}`
+type PartTemplate<MPK extends MessagePartsKeys, MPKS extends MessagePartsKeys, S extends ":" | ""> = MPK extends MPKS ? `${S}${MessageParts[MPK]}` : ""
+type Separator<MP extends MessagePrefix | "", PMPKS extends MessagePartsKeys | "", MPKS extends MessagePartsKeys> = MP extends MessagePrefix ? ":" : ":" extends { [K in PMPKS]: K extends MPKS ? ":" : never }[PMPKS] ? ":" : ""
+type MessageTemplate<MF extends MessageFlow | "", MP extends (MF extends MessageFlow ? MessagePrefix<MF> : "")  | "", MPKS extends MessagePartsKeys> =
+    `${MP}${PartTemplate<"originPrefix", MPKS, Separator<MP, "", MPKS>>}${PartTemplate<"number", MPKS, Separator<MP, "originPrefix", MPKS>>}${PartTemplate<"guessId", MPKS, Separator<MP, "originPrefix" | "number", MPKS>>}${PartTemplate<"body", MPKS, Separator<MP, "originPrefix" | "number" | "guessId", MPKS>>}`
 
 type MessagePartsPositions<M extends Message> =
     { prefix: 1 } & (M extends  `${MessageTemplate<"in", "ack", "originPrefix" | "number">}${any}` ?
@@ -34,6 +32,8 @@ type MessagePartsPositions<M extends Message> =
         {guessId: 3, body: 4} :
         {body: 3} :
     M extends MessageTemplate<MessageFlow, MessagePrefix, "number" | "guessId"> ? {guessId: 3} : {}))
+// use this type with only one message type not with unions, otherwise will work unexpectedly.
+type SpecificMessagePartsKeys<M extends Message> = keyof MessagePartsPositions<M>
 
 type OutboundToHostMesMessage = MessageTemplate<"out", "mes", "number" | "guessId" | "body">
 type OutboundToHostConMessage = MessageTemplate<"out","con", "number" | "guessId">
@@ -47,7 +47,7 @@ type OutboundMesMessage<UT extends UserType> = ("host" extends UT ? OutboundToHo
 type OutboundAckMessage<UT extends UserType> = ("host" extends UT ? OutboundToHostAckMessage : never) | ("guess" extends UT ? OutboundToGuessAckMessage : never)
 type OutboundConMessage<UT extends UserType> = ("host" extends UT ? OutboundToHostConMessage : never) | ("guess" extends UT ? OutboundToGuessConMessage : never)
 type OutboundDisMessage<UT extends UserType> = ("host" extends UT ? OutboundToHostDisMessage : never) | ("guess" extends UT ? OutboundToGuessDisMessage : never)
-type OutboundMessage<UT extends UserType, MP extends MessagePrefix<"out">> = GetTypesStartOnPrefix<OutboundConMessage<UT> | OutboundDisMessage<UT> | OutboundMesMessage<UT> | OutboundAckMessage<UT>, MP>
+type OutboundMessage<UT extends UserType=UserType, MP extends MessagePrefix<"out">=MessagePrefix<"out">> = GetTypesStartOnPrefix<OutboundConMessage<UT> | OutboundDisMessage<UT> | OutboundMesMessage<UT> | OutboundAckMessage<UT>, MP>
 
 type InboundFromHostMesMessage = MessageTemplate<"in","mes", "number" | "guessId" | "body">
 type InboundFromHostAckMessage = MessageTemplate<"in","ack", "originPrefix" | "number" | "guessId">
@@ -62,18 +62,28 @@ type Message<MF extends MessageFlow=MessageFlow, UT extends UserType=UserType, M
 type HandleMesMessage<UT extends UserType> = (m: InboundMesMessage<UT>) => void
 type HandleAckMessage<UT extends UserType> = (a: InboundAckMessage<UT> ) => void
 
-type MessageKeyRest<UT extends UserType, P extends MessagePrefix> = MessageFormat<"", "number" | (UT extends "host" ? P extends "ack" ? never : "guessId" : never) | (P extends "mes" ? "body" : never)>
-type MessageKey<UT extends UserType, P extends MessagePrefix> = `${UT}:${P}:${MessageKeyRest<UT, P>}`
-type GetConMessageAndKey<UT extends UserType> = () => [OutboundConMessage<UT>, MessageKey<UT, "con">]
-type GetDisMessageAndKey<UT extends UserType> = () => [OutboundDisMessage<UT>, MessageKey<UT, "dis">]
-type GetMesMessageAndKey<UT extends UserType> = () => [OutboundMesMessage<UT>, MessageKey<UT, "mes">]
-type GetAckMessageAndKey<UT extends UserType> = () => [OutboundAckMessage<UT>, MessageKey<UT, "ack">]
-type SendMessage = (mp: MessagePrefix, payload: string) => void
+type GuessId<UT extends UserType> = UT extends "guess" ? `:${MessageTemplate<"", "", "guessId">}` : ""
+type MessageKey<UT extends UserType, M extends OutboundMessage<UT>> = `${UT}${GuessId<UT>}:${}`
+
+// @ts-ignore: the compiler does not realize that the first type param in MessageKey UT is the same in the second OutboundConMessage<UT> and evaluate all possibilities
+type GetConMessageAndKey<UT extends UserType> = () => [OutboundConMessage<UT>, MessageKey<UT, OutboundConMessage<UT>>]
+// @ts-ignore
+type GetDisMessageAndKey<UT extends UserType> = () => [OutboundDisMessage<UT>, MessageKey<UT, OutboundDisMessage<UT>>]
+// @ts-ignore
+type GetMesMessageAndKey<UT extends UserType> = () => [OutboundMesMessage<UT>, MessageKey<UT, OutboundMesMessage<UT>>]
+// @ts-ignore
+type GetAckMessageAndKey<UT extends UserType> = () => [OutboundAckMessage<UT>, MessageKey<UT, OutboundAckMessage<UT>>]
+
+type RedisPayload<OM extends OutboundMessage> = { [M in OM]: MessageTemplate<"", "", Extract<MessagePartsKeys, SpecificMessagePartsKeys<OM>>> }[OM]
+type SendMessage = (mp: MessagePrefix<"out">, payload: RedisPayload<OutboundMessage>) => void
 type SubscribeToMessages = (sendMessage: SendMessage, isHostUser: boolean, guessId?: string) => void
-type PublishMessage = <B extends boolean>(mp: MessagePrefix, payload: string, toHostUser: B, toGuessId: B extends false ? string : undefined) => void
+type PublishMessage = <M extends OutboundMessage,B extends boolean>(mp: MessagePrefix, payload: RedisPayload<M>, toHostUser: B, toGuessId: B extends false ? string : undefined) => void
 type CacheMessage = <UT extends UserType, P extends MessagePrefix>(key: MessageKey<UT, P>, message: OutboundMessage<UT, P>) => void
 type RemoveMessage = <UT extends UserType, P extends MessagePrefix>(key: MessageKey<UT, P>) => void
 type IsMessageAck = <UT extends UserType, P extends MessagePrefix>(key: MessageKey<UT, P>) => Promise<boolean>
+
+type CutMessage<M extends Message> = MessageTemplate<MessageFlow>
+type SUBSTRING<T, U> = T extends `${infer X}${U}${infer Y}` ? X : never;
 
 // type SpecificMessagePartsKeys<M extends Message<UserType, MessagePrefix>> = Exclude<MessagePartsKeys, M extends MessageFormat<MessagePrefix, "originPrefix" | "number" | "guessId"> ? "body" :
 //     M extends MessageFormat<MessagePrefix, "originPrefix" | "number"> ? "body" | "guessId" :
@@ -216,7 +226,7 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
 
             const sendMessageToHost: SendMessage = (mp, payload) => {
                 const getConMessageAndKey: GetConMessageAndKey<"host"> = () => {
-                    const message: OutboundToHostConMessage = `con:${payload as MessageFormat<"", "number" | "guessId">}`
+                    const message: OutboundToHostConMessage = `con:${payload as RedisPayload<OutboundToHostConMessage>}`
                     const key: MessageKey<"host"> = `host:${message}`
                     return [message, key]
                 }
@@ -239,17 +249,17 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
             }
             const sendMessageToGuess: SendMessage = (mp, payload) => {
                 const getConMessageAndKey: GetConMessageAndKey<"guess"> = () => {
-                    const message: OutboundToGuessConMessage = `con:${payload as MessageFormat<"", "number">}`
+                    const message: OutboundToGuessConMessage = `con:${payload}`
                     const key: MessageKey<"guess"> = `guess:${guessId}:${message}`
                     return [message, key]
                 }
                 const getDisMessageAndKey: GetDisMessageAndKey<"guess"> = () => {
-                    const message: OutboundToGuessDisMessage = `dis:${payload as MessageFormat<"", "number">}`
+                    const message: OutboundToGuessDisMessage = `dis:${payload}`
                     const key: MessageKey<"guess"> = `guess:${guessId}:${message}`
                     return [message, key]
                 }
                 const getMesMessageAndKey: GetMesMessageAndKey<"guess"> = () => {
-                    const message: OutboundToGuessMesMessage = `mes:${payload as MessageFormat<"", "number" | "body">}`
+                    const message: OutboundToGuessMesMessage = `mes:${payload}`
                     const key: MessageKey<"guess"> = `guess:${guessId}:${getCutMessage(message, {body: 3}, 3)}`
                     return [message, key]
                 }
@@ -360,17 +370,17 @@ const init = async () => {
         const subscriber = redisClient.duplicate()
         await subscriber.connect()
 
-        await subscriber.subscribe(getConnectionsChannel(isHostUser), (message, channel) => {
-            sendMessage("con", message)
+        await subscriber.subscribe(getConnectionsChannel(isHostUser), (payload, channel) => {
+            sendMessage("con", payload)
         })
-        await subscriber.subscribe(getDisconnectionsChannel(isHostUser), (message, channel) => {
-            sendMessage("dis", message)
+        await subscriber.subscribe(getDisconnectionsChannel(isHostUser), (payload, channel) => {
+            sendMessage("dis", payload)
         })
-        await subscriber.subscribe(getMessagesChannel(isHostUser, guessId), (message, channel) => {
-            sendMessage("mes", message)
+        await subscriber.subscribe(getMessagesChannel(isHostUser, guessId), (payload, channel) => {
+            sendMessage("mes", payload)
         })
-        await subscriber.subscribe(getAcknowledgmentChannel(isHostUser, guessId), (message, channel) => {
-            sendMessage("ack", message)
+        await subscriber.subscribe(getAcknowledgmentChannel(isHostUser, guessId), (payload, channel) => {
+            sendMessage("ack", payload)
         })
     }
     const publishMessage: PublishMessage = (mp, payload, toHostUser, toGuessId) => {
