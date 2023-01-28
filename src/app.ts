@@ -5,7 +5,7 @@ import dotenv from "dotenv"
 import {getIndexOnOccurrence} from "./utils/Strings"
 
 //generic types
-// type IsUnion<U extends string> = { [M in U]: U extends M ? false : true }[U]
+ type IsUnion<U extends PropertyKey> = { [M in U]: U extends M ? false : true }[U]
 // type GetTypesStartOnPrefix<U extends string, P extends string> = { [M in U]: IsUnion<M> extends true ? GetTypesStartOnPrefix<M, P> : M extends `${infer MT}` ? MT extends `${P}${any}` ? MT : never : never }[U]
 
 type UserType = "host" | "guess"
@@ -17,6 +17,7 @@ type PartTemplate<MPK extends MessagePartsKeys, MPKS extends MessagePartsKeys, S
 //type Separator<MP extends MessagePrefix | "", PMPKS extends MessagePartsKeys | "", MPKS extends MessagePartsKeys> = MP extends MessagePrefix ? ":" : ":" extends { [K in PMPKS]: K extends MPKS ? ":" : never }[PMPKS] ? ":" : ""
 type MessageTemplateInstance<MP extends MessagePrefix, MPKS extends MessagePartsKeys> =
     `${MP}${PartTemplate<"originPrefix", MPKS, ":">}${PartTemplate<"number", MPKS, ":">}${PartTemplate<"guessId", MPKS, ":">}${PartTemplate<"body", MPKS, ":">}`
+type CutMessage<M extends Message[], WC extends MessagePartsKeys> = M extends [infer OM, ...infer RM] ? OM extends Message ? MessageTemplateInstance<OM["prefix"], Exclude<OM["parts"], WC>> | (RM extends Message[] ? CutMessage<RM, WC> : never) : never : never
 //type CutMessage<MP extends MessageParts, WC extends MessagePartsKeys>= { [OMP in MP]: SpecificMessagePartsKeys<OMP> extends infer SMPK ? MessageTemplateInstance<Extract<SMPK,MessagePrefix>, Exclude<SMPK, WC>> : never}[MP]
 // for now this is only for one message type, if a union is passed the result type will be unexpected
 /*type MessagePartsPositions<M extends Message, MP = GetPrefix<M>> = {
@@ -92,7 +93,7 @@ type GetMessages<UT extends UserType = UserType, MF extends MessageFlow = Messag
 type HandleMesMessage<UT extends UserType> = (m: InboundMessageTemplate<UT, "mes">) => void
 type HandleAckMessage<UT extends UserType> = (a: InboundMessageTemplate<UT, "ack">) => void
 
-type RedisMessageKey<M extends OutboundMessage[] = GetMessages<UserType, "out", MessagePrefix<"out">>> = M extends [infer OM, ...infer RM] ? OM extends OutboundMessage ? `${OM["userType"]}${OM["userType"] extends "guess" ? `:${MessageParts["guessId"]}` : ""}:${MessageTemplateInstance<OM["prefix"], Exclude<OM["parts"], "body">>}` | (RM extends OutboundMessage[] ? RedisMessageKey<RM> : never) : never : never
+type RedisMessageKey<M extends OutboundMessage[] = GetMessages<UserType, "out", MessagePrefix<"out">>> = M extends [infer OM, ...infer RM] ? OM extends OutboundMessage ? `${OM["userType"]}${OM["userType"] extends "guess" ? `:${MessageParts["guessId"]}` : ""}:${CutMessage<[OM], "body">}` | (RM extends OutboundMessage[] ? RedisMessageKey<RM> : never) : never : never
 // the message less the prefix
 type RedisMessagePayload<MT extends OutboundMessageTemplate> = { [OMT in MT]: OMT extends `${MessagePrefix<"out">}:${infer R}` ? R : never }[MT]
 
@@ -112,12 +113,12 @@ type CacheMessage = <M extends OutboundMessage>(key: RedisMessageKey<[M]>, messa
 type RemoveMessage = <M extends OutboundMessage>(key: RedisMessageKey<[M]>) => void
 type IsMessageAck = <M extends OutboundMessage>(key: RedisMessageKey<[M]>) => Promise<boolean>
 
-type AnyMessagePartsPositions<M extends Message, SMPK extends SpecificMessagePartsKeys<M>> = { [OM in M]: { [K in SMPK as K extends SpecificMessagePartsKeys<OM> ? K : never]: K extends keyof MessagePartsPositions<OM> ? MessagePartsPositions<OM>[K] : never } }[M]
-type GotMessageParts<M extends Message, SMPK extends SpecificMessagePartsKeys<M>> = { [K in SMPK]: { [OM in M]: K extends SpecificMessagePartsKeys<OM> ? MessageParts[K] : undefined }[M] }
-type LastPosition<M extends Message, LASTS= [4, 3, 2, 1]> = LASTS extends [infer LAST, ...infer REST] ? LAST extends SpecificMessagePartsPositionsValues<M> ? LAST : LastPosition<M,REST> : never
+type CommonMessagePartsPositions<MPP extends MessagePartsPositions> = { [K in keyof MPP]: MPP[K] extends number ? IsUnion<MPP[K]> extends true ? never : K extends MessagePartsKeys ? K : never : never }[keyof MPP]
+type AnyMessagePartsPositions<MPP extends MessagePartsPositions, CMPP extends CommonMessagePartsPositions<MPP>> = { [K in CMPP]: MPP[K] }
+type GotMessageParts<MPP extends MessagePartsPositions, CMPP extends CommonMessagePartsPositions<MPP>> = { [K in CMPP]: MessageParts[K] }
+type LastPosition<MPP extends MessagePartsPositions, LASTS = [4, 3, 2, 1]> = LASTS extends [infer LAST, ...infer REST] ? LAST extends MPP[keyof MPP] ? LAST : LastPosition<MPP, REST> : never
 
-// should be added the
-const getMessageParts = <M extends Message, SMPK extends SpecificMessagePartsKeys<M>>(m: M["template"], whatGet: AnyMessagePartsPositions<M, SMPK>) => {
+const getMessageParts = <M extends Message, CMPP extends CommonMessagePartsPositions<MPP>, MPP extends M["positions"] = M["positions"]>(m: M["template"], whatGet: AnyMessagePartsPositions<MPP, CMPP>) => {
     const messageParts: any = {}
     const getPartSeparatorIndex = (occurrence: number) => getIndexOnOccurrence(m, ":", occurrence)
     if ("prefix" in whatGet)
@@ -133,10 +134,10 @@ const getMessageParts = <M extends Message, SMPK extends SpecificMessagePartsKey
     if ("body" in whatGet)
         messageParts["body"] = m.substring(getPartSeparatorIndex((whatGet.body as 3 | 4) - 1) + 1, m.length - 1)
 
-    return messageParts as GotMessageParts<M, SMPK>
+    return messageParts as GotMessageParts<MPP, CMPP>
 }
 
-const getCutMessage = <M extends Message, SMPK extends SpecificMessagePartsKeys<M>>(m: M, whatCut: AnyMessagePartsPositions<M, SMPK>, lastPosition: LastPosition<M>) => {
+const getCutMessage = <M extends Message, CMPP extends CommonMessagePartsPositions<MPP>, MPP extends M["positions"] = M["positions"]>(m: M["template"], whatCut: AnyMessagePartsPositions<MPP, CMPP>, lastPosition: LastPosition<MPP>) => {
     let cutMessage: string = m
     let position = 0
     let cutSize = 0
@@ -193,7 +194,7 @@ const getCutMessage = <M extends Message, SMPK extends SpecificMessagePartsKeys<
         cut()
     }
 
-    return cutMessage as CutMessage<M, SMPK>
+    return cutMessage as CutMessage<[M], CMPP>
 }
 
 const initRedisConnection = async () => {
