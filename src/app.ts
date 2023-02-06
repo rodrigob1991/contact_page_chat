@@ -21,7 +21,7 @@ type SpecificMessagePartsKeys<UT extends UserType, MF extends MessageFlow, MP ex
     | ("in" | "ack" extends MF | MP ? "originPrefix" : never)
     | "number"
     | ("mes" extends MP ? "body" : never)
-    | ("host" extends UT ? MF | MP extends "out" | "ack" ? never : "guessId" : never)
+    | ("host" extends UT ? "guessId" : never)
 
 type SpecificMessagePartsPositions<SMPK extends MessagePartsKeys> = Pick<{ prefix: 1, originPrefix: 2, number: "originPrefix" extends SMPK ? 3 : 2, guessId: "originPrefix" extends SMPK ? 4 : 3, body: "guessId" extends SMPK ? 4 : 3 }, SMPK>
 //type GetSpecificMessagePartsKeys<SMPP extends SpecificMessagePartsPositions<UserType, MessageFlow, MessagePrefix> =
@@ -57,7 +57,7 @@ type InboundMessage<UT extends UserType=UserType, MP extends MessagePrefix<"in">
 type InboundMessageParts<UT extends UserType=UserType, MP extends MessagePrefix<"in">=MessagePrefix<"in">> = InboundMessage<UT, MP>["parts"]
 type InboundMessageTemplate<UT extends UserType=UserType, MP extends MessagePrefix<"in">=MessagePrefix<"in">> = InboundMessage<UT, MP>["template"]
 type InboundMessageTarget<M extends InboundMessage, UT = M["userType"]> = OutboundMessage<UserType extends M["userType"] ? M["userType"] : Exclude<UserType, UT>,  M["prefix"]>
-type InboundAckMessageOrigin<UT extends UserType = UserType, OP extends MessagePrefix<"out"> = MessagePrefix<"out">> = OutboundMessage<UT, OP>
+type InboundAckMessageOrigin<UT extends UserType = UserType, OP extends MessagePrefix<"out"> = MessagePrefix<"out">> = GetMessages<UT, "out", OP>
 
 type Message<UT extends UserType=UserType, MF extends MessageFlow=MessageFlow, MP extends MessagePrefix<MF>=MessagePrefix<MF>> = ("in" extends MF ? InboundMessage<UT, Exclude<MP, "con" | "dis">> : never)  | ("out" extends MF ? OutboundMessage<UT,MP> : never)
 type MessagePartsPositions<UT extends UserType=UserType, MF extends MessageFlow=MessageFlow, MP extends MessagePrefix<MF>=MessagePrefix<MF>> = Message<UT, MF, MP>["positions"]
@@ -90,7 +90,7 @@ type GuessIdToPublish<UT extends UserType, MP extends MessagePrefix> = UT extend
 // only for one message type, no unions.
 type PublishMessage = <M extends OutboundMessage>(messageParts: GetMessageParams<M>, toUserType: M["userType"], toGuessId: GuessIdToPublish<M["userType"], M["prefix"]>) => void
 type CacheMessage = <M extends OutboundMessage>(key: RedisMessageKey<[M]>, message: M["template"]) => void
-type RemoveMessage = <M extends OutboundMessage>(key: RedisMessageKey<[M]>) => void
+type RemoveMessage = <M extends OutboundMessage[]>(key: RedisMessageKey<M>) => void
 type IsMessageAck = <M extends OutboundMessage>(key: RedisMessageKey<[M]>) => Promise<boolean>
 
 // this is to filter the position that are not unions
@@ -240,10 +240,20 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
             // TODO: generate a unique number for each guess connected
             const guessId = userType === "guess" ? date : undefined
 
-            const getRedisMessageKey: GetRedisMessageKey = (params) => {
-
+            const sendMessage = (key: RedisMessageKey, message: OutboundMessageTemplate) => {
+                cacheMessage(key, message)
+                const resendUntilAck = () => {
+                    connection.sendUTF(message)
+                    setTimeout(() => {
+                        isMessageAck(key).then(is => {
+                            if (!is) {
+                                resendUntilAck()
+                            }
+                        })
+                    }, 5000)
+                }
+                resendUntilAck()
             }
-
             const sendMessageToHost: SendMessage<"host"> = (message) => {
                 let key: RedisMessageKey<GetMessages<"host", "out">>
                 const mp = getMessageParts<OutboundMessage<"host">, "prefix">(message, {prefix: 1}).prefix
@@ -259,28 +269,6 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
                     default:
                         throw new Error("invalid message prefix")
                 }
-
-
-                /*const getConMessageAndKey: GetConMessageAndKey = () => {
-                    const message: OutboundToHostConMessage["template"] = `con:${payload as RedisMessagePayload<OutboundToHostConMessage["template"]>}`
-                    const key: RedisMessageKey<[OutboundToHostConMessage]> = `host:${message}`
-                    return [message, key]
-                }
-                const getDisMessageAndKey: GetDisMessageAndKey = () => {
-                    const message: OutboundToHostDisMessage["template"] = `dis:${payload as RedisMessagePayload<OutboundToHostDisMessage["template"]>}`
-                    const key: RedisMessageKey<[OutboundToHostDisMessage]> = `host:${message}`
-                    return [message, key]
-                }
-                const getMesMessageAndKey: GetMesMessageAndKey = () => {
-                    const message: OutboundToHostMesMessage["template"] = `mes:${payload as RedisMessagePayload<OutboundToHostMesMessage["template"]>}`
-                    const key: RedisMessageKey<[OutboundToHostMesMessage]> = `host:${getCutMessage<OutboundToHostMesMessage, "body">(message, {body: 4}, 4)}`
-                    return [message, key]
-                }
-                const getAckMessageAndKey: GetAckMessageAndKey = () => {
-                    const message: OutboundToHostAckMessage["template"] = `ack:${payload as  RedisMessagePayload<OutboundToHostAckMessage["template"]>}`
-                    const key: RedisMessageKey<[OutboundToHostAckMessage]> = `host:${message}`
-                    return [message, key]
-                }*/
                 sendMessage(key, message)
             }
             const sendMessageToGuess: SendMessage<"guess"> = (message) => {
@@ -298,68 +286,7 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
                     default:
                         throw new Error("invalid message prefix")
                 }
-                /*const getConMessageAndKey: GetConMessageAndKey = () => {
-                    const message: OutboundToGuessConMessage["template"] = `con:${payload as RedisMessagePayload<OutboundToGuessConMessage["template"]>}`
-                    const key: RedisMessageKey<[OutboundToGuessConMessage]> = `guess:${guessId as number}:${message}`
-                    return [message, key]
-                }
-                const getDisMessageAndKey: GetDisMessageAndKey = () => {
-                    const message: OutboundToGuessDisMessage["template"] = `dis:${payload as RedisMessagePayload<OutboundToGuessDisMessage["template"]>}`
-                    const key: RedisMessageKey<[OutboundToGuessDisMessage]> = `guess:${guessId as number}:${message}`
-                    return [message, key]
-                }
-                const getMesMessageAndKey: GetMesMessageAndKey = () => {
-                    const message: OutboundToGuessMesMessage["template"] = `mes:${payload as RedisMessagePayload<OutboundToGuessMesMessage["template"]>}`
-                    const key: RedisMessageKey<[OutboundToGuessMesMessage]> = `guess:${guessId as number}:${getCutMessage<OutboundToGuessMesMessage, "body">(message, {body: 3}, 3)}`
-                    return [message, key]
-                }
-                const getAckMessageAndKey: GetAckMessageAndKey = () => {
-                    const message: OutboundToGuessAckMessage["template"] = `ack:${payload as RedisMessagePayload<OutboundToGuessAckMessage["template"]>}`
-                    const key: RedisMessageKey<[OutboundToGuessAckMessage]> = `guess:${guessId as number}:${message}`
-                    return [message, key]
-                }*/
                 sendMessage(key, message)
-            }
-
-            const sendMessage = (key: RedisMessageKey, message: OutboundMessageTemplate) => {
-               /* let message : OutboundMessageTemplate
-                let key: RedisMessageKey
-                switch (mp) {
-                    case "con":
-                        [message, key] = getConMessageAndKey()
-                        break
-                    case "dis":
-                        [message, key] = getDisMessageAndKey()
-                        break
-                    case "mes":
-                        [message, key] = getMesMessageAndKey()
-                        break
-                    case "ack":
-                        [message, key] = getAckMessageAndKey()
-                        break
-                    default:
-                        throw new Error("should had enter some case")
-                }*/
-                cacheMessage(key, message)
-                const resendUntilAck = () => {
-                    connection.sendUTF(message)
-                    setTimeout(() => {
-                        isMessageAck(key).then(is => {
-                            if (!is) {
-                                resendUntilAck()
-                            }
-                        })
-                    }, 5000)
-                }
-                resendUntilAck()
-            }
-
-            if (userType === "host") {
-                publishMessage<OutboundToGuessConMessage>({number: date, prefix: "con"}, "guess", undefined)
-                subscribeToMessages(sendMessageToHost, "host", undefined)
-            } else {
-                publishMessage<OutboundToHostConMessage>({number: date, prefix:"con", guessId: guessId as number}, "host", undefined)
-                subscribeToMessages(sendMessageToGuess, "guess", guessId as number)
             }
 
             const handleMessage = <UT extends UserType>(wsMessage: ws.Message, handleMesMessage: HandleMesMessage<UT>, handleAckMessage: HandleAckMessage<UT>) => {
@@ -380,39 +307,51 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
             const handleMessageFromHost = (m: ws.Message) => {
                 const handleMesMessage: HandleMesMessage<"host"> = (m) => {
                     const {number, guessId: toGuessId, body} = getMessageParts<InboundFromHostMesMessage, "number" | "guessId" | "body">(m, {number: 2, guessId: 3, body: 4})
-                    publishMessage<InboundMessageTarget<InboundFromHostMesMessage>>("mes", `${number}:${body}`, "guess", toGuessId)
+                    publishMessage<InboundMessageTarget<InboundFromHostMesMessage>>({prefix: "mes", number: number, body: body}, "guess", toGuessId)
                 }
                 const handleAckMessage: HandleAckMessage<"host"> = (a) => {
-                    const {originPrefix, number, guessId} = getMessageParts<InboundFromHostAckMessage, "number" | "guessId" | "originPrefix">(a, {originPrefix: 2, number: 3, guessId: 4})
-                    let messageOriginKey
-                    switch (originPrefix) {
-
+                    const {originPrefix, number, guessId: fromGuessId} = getMessageParts<InboundFromHostAckMessage, "number" | "guessId" | "originPrefix">(a, {originPrefix: 2, number: 3, guessId: 4})
+                    if (originPrefix === "mes") {
+                        publishMessage<OutboundToGuessAckMessage>({prefix: "ack", number: number}, "guess", fromGuessId)
                     }
-                    removeMessage(`host:${originPrefix}:${number}`)
-                    if (originPrefix === "mes")
-                    publishMessage<InboundMessageTarget<InboundFromHostAckMessage>>("ack", `${number}`, "guess", guessId)
+                    removeMessage<InboundAckMessageOrigin<"host">>(`host:${originPrefix}:${number}:${fromGuessId}`)
                 }
                 handleMessage<"host">(m, handleMesMessage, handleAckMessage)
             }
             const handleMessageFromGuess = (m: ws.Message) => {
                 const handleMesMessage: HandleMesMessage<"guess"> = (m) => {
                     const {number, body} = getMessageParts<InboundFromGuessMesMessage, "number" | "body">(m, {number: 2, body: 3})
-                    publishMessage<InboundMessageTarget<InboundFromGuessMesMessage>>("mes", `${number}:${guessId as number}:${body}`, "host", undefined)
+                    publishMessage<InboundMessageTarget<InboundFromGuessMesMessage>>({prefix: "mes", number: number, guessId: guessId as number, body: body}, "host", undefined)
                 }
                 const handleAckMessage: HandleAckMessage<"guess"> = (a) => {
                     const {originPrefix, number} = getMessageParts<InboundFromGuessAckMessage, "originPrefix" | "number">(a, {originPrefix: 2, number: 3})
-                    removeMessage<InboundMessageTarget<InboundFromGuessAckMessage>>(`host:ack:${number}`)
+                    removeMessage<InboundAckMessageOrigin<"guess">>(`guess:${guessId as number}:${originPrefix}:${number}`)
                     if (originPrefix === "mes")
-                        publishMessage<InboundMessageTarget<InboundFromGuessAckMessage>>("ack", `${number}`, "host", undefined)
+                        publishMessage<OutboundToHostAckMessage>({prefix: "ack", number: number, guessId: guessId as number}, "host", undefined)
                 }
                 handleMessage(m, handleMesMessage, handleAckMessage)
             }
-            connection.on("message", isHostUser ? handleMessageFromHost : handleMessageFromGuess)
-            connection.on("close", (reasonCode, description) => {
-                const disDate = Date.now()
-                publishMessage("dis", disDate + ":" + (isHostUser ? "" : guessId), !isHostUser, guessId)
-                console.log(disDate + " peer " + connection.remoteAddress + " disconnected.")
-            })
+
+            const handleHostDisconnection = (reasonCode: number, description: string) => {
+                console.log(`host disconnected, reason code:${reasonCode}, description: ${description}`)
+                publishMessage<OutboundToGuessDisMessage>({prefix: "dis", number: Date.now()}, "guess", undefined)
+            }
+            const handleGuessDisconnection = (reasonCode: number, description: string) => {
+                console.log(`guess ${guessId} disconnected, reason code:${reasonCode}, description: ${description}`)
+                publishMessage<OutboundToHostDisMessage>({prefix: "dis", number: Date.now(), guessId: guessId as number}, "host", undefined)
+            }
+
+            if (userType === "host") {
+                connection.on("message", handleMessageFromHost)
+                connection.on("close", handleHostDisconnection)
+                subscribeToMessages(sendMessageToHost, "host", undefined)
+                publishMessage<OutboundToGuessConMessage>({number: Date.now(), prefix: "con"}, "guess", undefined)
+            } else {
+                connection.on("message", handleMessageFromGuess)
+                connection.on("close", handleGuessDisconnection)
+                subscribeToMessages(sendMessageToGuess, "guess", guessId as number)
+                publishMessage<OutboundToHostConMessage>({number: Date.now(), prefix:"con", guessId: guessId as number}, "host", undefined)
+            }
         }
     })
 }
@@ -431,11 +370,11 @@ const init = async () => {
 
         const isHostUser = ofUserType === "host"
 
-        await subscriber.subscribe(getConDisChannel(isHostUser), (payload, channel) => {
-            sendMessage("mes", payload)
+        await subscriber.subscribe(getConDisChannel(isHostUser), (message, channel) => {
+            sendMessage(message as OutboundMessageTemplate<UserType, "con" | "dis">)
         })
-        await subscriber.subscribe(getMessagesChannel(isHostUser, guessId), (payload, channel) => {
-            sendMessage("mes", payload)
+        await subscriber.subscribe(getMessagesChannel(isHostUser, guessId), (message, channel) => {
+            sendMessage(message as OutboundMesMessage["template"])
         })
     }
     const publishMessage: PublishMessage = (parts, toUserType, toGuessId) => {
