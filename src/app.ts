@@ -4,12 +4,16 @@ import http from "http"
 import dotenv from "dotenv"
 import {getIndexOnOccurrence} from "./utils/Strings"
 
+const users = {host: "host", guess: "guess"} as const
+const messageFlows = {in: "in", out: "out"} as const
+const messagePrefixes = {con: "con", dis: "dis", mes: "mes", ack: "ack"} as const
+const messageParts = {prefix: "prefix", originPrefix: "originPrefix", number: "number", guessId: "guessId", body: "body"} as const
 //generic types
 // type GetTypesStartOnPrefix<U extends string, P extends string> = { [M in U]: IsUnion<M> extends true ? GetTypesStartOnPrefix<M, P> : M extends `${infer MT}` ? MT extends `${P}${any}` ? MT : never : never }[U]
-type UserType = "host" | "guess"
-type MessageFlow = "in" | "out"
-type MessagePrefix<MF extends MessageFlow=MessageFlow> = "mes" | "ack" | ("out" extends MF ? "con" | "dis" : never)
-type MessageParts = { prefix: MessagePrefix, originPrefix: MessagePrefix<"out">, number: number, guessId: number, body: `-${string}`}
+type UserType = typeof users[keyof typeof users]
+type MessageFlow = typeof messageFlows[keyof typeof messageFlows]
+type MessagePrefix<MF extends MessageFlow=MessageFlow> = typeof messagePrefixes["mes" | "ack"] | ("out" extends MF ? typeof messagePrefixes["con" | "dis"] : never)
+type MessageParts = { [messageParts.prefix]: MessagePrefix, [messageParts.originPrefix]: MessagePrefix<"out">, [messageParts.number]: number, [messageParts.guessId]: number, [messageParts.body]: `-${string}`}
 type MessagePartsKeys = keyof MessageParts
 type PartTemplate<MPK extends MessagePartsKeys, MPKS extends MessagePartsKeys, S extends ":" | ""> = MPK extends MPKS ? `${S}${MessageParts[MPK]}` : ""
 type MessageTemplateInstance<MP extends MessagePrefix, MPKS extends MessagePartsKeys> =
@@ -92,6 +96,8 @@ type PublishMessage = <M extends OutboundMessage>(messageParts: GetMessageParams
 type CacheMessage = <M extends OutboundMessage>(key: RedisMessageKey<[M]>, message: M["template"]) => void
 type RemoveMessage = <M extends OutboundMessage[]>(key: RedisMessageKey<M>) => void
 type IsMessageAck = <M extends OutboundMessage>(key: RedisMessageKey<[M]>) => Promise<boolean>
+type NewUser = (userType: UserType) => Promise<number | void>
+type RemoveUser = (guessId: number | undefined) => void
 
 // this is to filter the position that are not unions
 type IfUniquePosition<P, K> = { [N in 1 | 2 | 3 | 4]: N extends P ? Exclude<P, N> extends never ? K : never : never }[1 | 2 | 3 | 4]
@@ -103,37 +109,37 @@ type GetMessageParams<M extends Message> = { [K in keyof M["positions"] | "prefi
 
 const getMessage = <M extends Message>(parts: GetMessageParams<M>) => {
     let message = ""
-    if ("prefix" in parts)
+    if (messageParts.prefix in parts)
         message += parts.prefix
-    if ("originPrefix" in parts)
+    if (messageParts.originPrefix in parts)
         message += ":" + parts.originPrefix
-    if ("number" in parts)
+    if (messageParts.number in parts)
         message += ":" + parts.number
-    if ("guessId" in parts)
+    if (messageParts.guessId in parts)
         message += ":" + parts.guessId
-    if ("body" in parts)
+    if (messageParts.body in parts)
         message += ":" + parts.body
 
     return message as M["template"]
 }
 
 const getMessageParts = <M extends Message, CMPP extends CommonMessagePartsPositions<M>>(m: M["template"], whatGet: AnyMessagePartsPositions<M, CMPP>) => {
-    const messageParts: any = {}
+    const parts: any = {}
     const getPartSeparatorIndex = (occurrence: number) => getIndexOnOccurrence(m, ":", occurrence)
-    if ("prefix" in whatGet)
-        messageParts["prefix"] = m.substring(0, 3)
-    if ("originPrefix" in whatGet)
-        messageParts["originPrefix"] = m.substring(4, 7)
-    if ("number" in whatGet)
-        messageParts["number"] = m.substring(8, getPartSeparatorIndex(whatGet.number as 2 | 3))
-    if ("guessId" in whatGet) {
+    if (messageParts.prefix in whatGet)
+        parts["prefix"] = m.substring(0, 3)
+    if (messageParts.originPrefix in whatGet)
+        parts["originPrefix"] = m.substring(4, 7)
+    if (messageParts.number in whatGet)
+        parts["number"] = m.substring(8, getPartSeparatorIndex(whatGet.number as 2 | 3))
+    if (messageParts.guessId in whatGet) {
         const guessIdPosition = whatGet.guessId as 3 | 4
-        messageParts["guessId"] = m.substring(getPartSeparatorIndex(guessIdPosition - 1) + 1, getPartSeparatorIndex(guessIdPosition))
+        parts["guessId"] = m.substring(getPartSeparatorIndex(guessIdPosition - 1) + 1, getPartSeparatorIndex(guessIdPosition))
     }
-    if ("body" in whatGet)
-        messageParts["body"] = m.substring(getPartSeparatorIndex((whatGet.body as 3 | 4) - 1) + 1, m.length - 1)
+    if (messageParts.body in whatGet)
+        parts["body"] = m.substring(getPartSeparatorIndex((whatGet.body as 3 | 4) - 1) + 1, m.length - 1)
 
-    return messageParts as GotMessageParts<M, CMPP>
+    return parts as GotMessageParts<M, CMPP>
 }
 
 const getCutMessage = <M extends Message, CMPP extends CommonMessagePartsPositions<M>, MPP extends M["positions"] = M["positions"]>(m: M["template"], whatCut: AnyMessagePartsPositions<M, CMPP>, lastPosition: LastPosition<MPP>) => {
@@ -163,30 +169,30 @@ const getCutMessage = <M extends Message, CMPP extends CommonMessagePartsPositio
         cutCount ++
     }
 
-    if ("prefix" in whatCut) {
+    if (messageParts.prefix in whatCut) {
         position = 1
         partEndIndex = 2
         cut()
     }
-    if ("originPrefix" in whatCut) {
+    if (messageParts.originPrefix in whatCut) {
         position = 2
         partStartIndex = 4 - cutSize
         partEndIndex = 6 - cutSize
         cut()
     }
-    if ("number" in whatCut) {
+    if (messageParts.number in whatCut) {
         position = whatCut.number as 2 | 3
         partStartIndex = 8 - cutSize
         partEndIndex = findPartBoundaryIndex(false)
         cut()
     }
-    if ("guessId" in whatCut) {
+    if (messageParts.guessId in whatCut) {
         position = whatCut.guessId as 3 | 4
         partStartIndex = findPartBoundaryIndex()
         partEndIndex = findPartBoundaryIndex(false)
         cut()
     }
-    if ("body" in whatCut) {
+    if (messageParts.body in whatCut) {
         position = whatCut.body as 3 | 4
         partEndIndex = findPartBoundaryIndex()
         partEndIndex = m.length - 1
@@ -197,7 +203,12 @@ const getCutMessage = <M extends Message, CMPP extends CommonMessagePartsPositio
 }
 
 const initRedisConnection = async () => {
-    const client = createClient({username: process.env.REDIS_USERNAME, password: process.env.REDIS_PASSWORD})
+    const client = createClient({url: process.env.URL, username: process.env.REDIS_USERNAME, password: process.env.REDIS_PASSWORD})
+    client.on('error', (err) => { console.error(err) })
+    client.on('connect', () => { console.log('connected with redis') })
+    client.on('reconnecting', () => { console.log('reconnecting with redis') })
+    client.on('ready', () => { console.log('redis is ready') })
+
     try {
         await client.connect()
     } catch (e) {
@@ -217,7 +228,7 @@ const initHttpServer = () => {
 
     return httpServer
 }
-const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage: PublishMessage, cacheMessage: CacheMessage, removeMessage: RemoveMessage, isMessageAck: IsMessageAck) => {
+const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage: PublishMessage, cacheMessage: CacheMessage, removeMessage: RemoveMessage, isMessageAck: IsMessageAck, newUser: NewUser, removeUser: RemoveUser) => {
     const wsServer = new ws.server({
         httpServer: initHttpServer(),
         autoAcceptConnections: false
@@ -226,7 +237,7 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
     const originIsAllowed = (origin: string) => {
         return true
     }
-    wsServer.on("request", (request) => {
+    wsServer.on("request", async (request) => {
         const origin = request.origin
         const date = Date.now()
         if (!originIsAllowed(origin)) {
@@ -236,12 +247,12 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
             const connection = request.accept("echo-protocol", origin)
             console.log((date) + " connection accepted")
 
-            const userType: UserType = request.httpRequest.headers.host_user === process.env.HOST_USER_SECRET ? "host" : "guess"
-            // TODO: generate a unique number for each guess connected
-            const guessId = userType === "guess" ? date : undefined
+            const userType: UserType = request.httpRequest.headers.host_user === process.env.HOST_USER_SECRET ? users.host : users.guess
+            const guessId = await newUser(userType)
 
             const sendMessage = (key: RedisMessageKey, message: OutboundMessageTemplate) => {
                 cacheMessage(key, message)
+
                 const resendUntilAck = () => {
                     connection.sendUTF(message)
                     setTimeout(() => {
@@ -311,7 +322,7 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
                 }
                 const handleAckMessage: HandleAckMessage<"host"> = (a) => {
                     const {originPrefix, number, guessId: fromGuessId} = getMessageParts<InboundFromHostAckMessage, "number" | "guessId" | "originPrefix">(a, {originPrefix: 2, number: 3, guessId: 4})
-                    if (originPrefix === "mes") {
+                    if (originPrefix === messagePrefixes.mes) {
                         publishMessage<OutboundToGuessAckMessage>({prefix: "ack", number: number}, "guess", fromGuessId)
                     }
                     removeMessage<InboundAckMessageOrigin<"host">>(`host:${originPrefix}:${number}:${fromGuessId}`)
@@ -326,7 +337,7 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
                 const handleAckMessage: HandleAckMessage<"guess"> = (a) => {
                     const {originPrefix, number} = getMessageParts<InboundFromGuessAckMessage, "originPrefix" | "number">(a, {originPrefix: 2, number: 3})
                     removeMessage<InboundAckMessageOrigin<"guess">>(`guess:${guessId as number}:${originPrefix}:${number}`)
-                    if (originPrefix === "mes")
+                    if (originPrefix === messagePrefixes.mes)
                         publishMessage<OutboundToHostAckMessage>({prefix: "ack", number: number, guessId: guessId as number}, "host", undefined)
                 }
                 handleMessage(m, handleMesMessage, handleAckMessage)
@@ -335,13 +346,15 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
             const handleHostDisconnection = (reasonCode: number, description: string) => {
                 console.log(`host disconnected, reason code:${reasonCode}, description: ${description}`)
                 publishMessage<OutboundToGuessDisMessage>({prefix: "dis", number: Date.now()}, "guess", undefined)
+                removeUser(undefined)
             }
             const handleGuessDisconnection = (reasonCode: number, description: string) => {
                 console.log(`guess ${guessId} disconnected, reason code:${reasonCode}, description: ${description}`)
                 publishMessage<OutboundToHostDisMessage>({prefix: "dis", number: Date.now(), guessId: guessId as number}, "host", undefined)
+                removeUser(guessId as number)
             }
 
-            if (userType === "host") {
+            if (userType === users.host) {
                 connection.on("message", handleMessageFromHost)
                 connection.on("close", handleHostDisconnection)
                 subscribeToMessages(sendMessageToHost, "host", undefined)
@@ -359,27 +372,29 @@ const initWebSocket = (subscribeToMessages : SubscribeToMessages, publishMessage
 const init = async () => {
     const redisClient = await initRedisConnection()
 
-    const suffixHost = "host"
-    const suffixGuess = "guess"
-    const getConDisChannel = (isHostUser: boolean) => "con-dis" + "-" + (isHostUser ? suffixHost : suffixGuess)
-    const getMessagesChannel = (isHostUser: boolean, guessId?: number) => "mes" + "-" + (isHostUser ? suffixHost : suffixGuess + "-" + guessId)
+    const storageHostMember = "1"
+
+    const getConDisChannel = (isHostUser: boolean) => messagePrefixes.con + "-" + messagePrefixes.dis + "-" + (isHostUser ? users.host : users.guess)
+    const getMessagesChannel = (isHostUser: boolean, guessId?: number) => messagePrefixes.mes + "-" + (isHostUser ? users.host : users.guess + "-" + guessId)
 
     const subscribeToMessages: SubscribeToMessages = async (sendMessage, ofUserType, guessId) => {
         const subscriber = redisClient.duplicate()
         await subscriber.connect()
 
-        const isHostUser = ofUserType === "host"
+        const isHostUser = ofUserType === users.host
 
         await subscriber.subscribe(getConDisChannel(isHostUser), (message, channel) => {
-            sendMessage(message as OutboundMessageTemplate<UserType, "con" | "dis">)
+            // @ts-ignore
+            sendMessage(message as OutboundMessageTemplate<typeof ofUserType, "con" | "dis">)
         })
         await subscriber.subscribe(getMessagesChannel(isHostUser, guessId), (message, channel) => {
-            sendMessage(message as OutboundMesMessage["template"])
+            // @ts-ignore
+            sendMessage(message as OutboundMessageTemplate<typeof ofUserType, "mes" | "ack">)
         })
     }
     const publishMessage: PublishMessage = (parts, toUserType, toGuessId) => {
         let channel
-        const isToHostUser = toUserType === "host"
+        const isToHostUser = toUserType === users.host
 
         switch (parts.prefix) {
             case "con":
@@ -400,7 +415,32 @@ const init = async () => {
     const removeMessage: RemoveMessage = (key) => { redisClient.del(key) }
     const isMessageAck: IsMessageAck = async (key) => await redisClient.get(key) === null
 
-    initWebSocket(subscribeToMessages, publishMessage, cacheMessage, removeMessage, isMessageAck)
+    const newUser: NewUser = (userType) => {
+        let promise: Promise<number | void>
+        if (userType === users.host) {
+            promise = redisClient.sAdd(users.host, storageHostMember)
+        } else {
+            promise = redisClient.sCard(users.guess).then(guessesCount => {
+                const newGuessNumber = guessesCount + 1
+                redisClient.sAdd(users.guess, newGuessNumber + "")
+                return newGuessNumber
+            })
+        }
+        return promise
+    }
+    const removeUser: RemoveUser = (guessId) => {
+        let key, member
+        if (guessId) {
+            key = users.guess
+            member = guessId + ""
+        } else {
+            key = users.host
+            member = storageHostMember
+        }
+        redisClient.sRem(key, member)
+    }
+
+    initWebSocket(subscribeToMessages, publishMessage, cacheMessage, removeMessage, isMessageAck, newUser, removeUser)
 }
 
 dotenv.config()
